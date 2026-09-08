@@ -5,7 +5,6 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-import billing
 from nodes import resolve_monitored_nodes
 from notify import esc
 from reports import generate_traffic_report
@@ -122,13 +121,12 @@ class QuotaBot:
             return
         await query.edit_message_text("⏳ Собираю статистику по нодам…")
 
+        days = int(self.config.get("billing", {}).get("subscription_cycle_days", 30))
+
         def _build() -> str:
             cfg = dict(self.config)
             cfg["monitored_nodes"] = resolve_monitored_nodes(self.api, self.config)
-            start, end = billing.scan_window_dates(self.config)
-            return generate_traffic_report(
-                self.api, cfg, start=start, end=end, title="Текущий период", top_n=10
-            )
+            return generate_traffic_report(self.api, cfg, days=days, top_n=10)
 
         try:
             text = await asyncio.to_thread(_build)

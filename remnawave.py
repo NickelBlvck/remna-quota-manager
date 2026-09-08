@@ -78,18 +78,47 @@ class RemnawaveAPI:
     def get_node_bandwidth_stats(
         self, node_uuid: str, start_date: str, end_date: str, top_limit: int = 100
     ) -> Dict:
+        """Top users on one node for a date range.
+
+        Documented endpoint: POST /api/bandwidth-stats/nodes/users with the node
+        list in the body. Response is
+        ``{categories, sparklineData, topUsers:[{username,total}]}`` — ``total``
+        in bytes, no node-total field, no per-node split. Falls back to the
+        legacy GET route for older panels.
+        """
+        params = {"start": start_date, "end": end_date, "topUsersLimit": str(top_limit)}
         result = self._request(
-            "GET", f"/api/bandwidth-stats/nodes/{node_uuid}/users",
-            params={"start": start_date, "end": end_date, "topUsersLimit": str(top_limit)},
+            "POST", "/api/bandwidth-stats/nodes/users",
+            params=params, json={"nodesUuids": [node_uuid]},
         )
-        if not result or not isinstance(result, dict):
+        if not isinstance(result, dict):
+            result = self._request(
+                "GET", f"/api/bandwidth-stats/nodes/{node_uuid}/users", params=params
+            )
+        if not isinstance(result, dict):
             return {"topUsers": [], "total_bytes": None}
-        top_users = result.get("topUsers", [])
+
+        top_users = result.get("topUsers", []) or []
+
         total_bytes = None
-        for key in ("total", "totalBytes", "totalTraffic", "bandwidthTotal"):
+        for key in ("total", "totalBytes", "totalUsage", "totalTraffic", "bandwidthTotal"):
             if result.get(key) is not None:
                 total_bytes = int(result[key])
                 break
+        if total_bytes is None:
+            spark = result.get("sparklineData")
+            if isinstance(spark, list) and spark:
+                try:
+                    total_bytes = int(sum(spark))
+                except (TypeError, ValueError):
+                    total_bytes = None
+        if total_bytes is None and top_users:
+            # last resort: sum the returned top users (understates the tail)
+            try:
+                total_bytes = int(sum(int(u.get("total", 0)) for u in top_users))
+            except (TypeError, ValueError):
+                total_bytes = None
+
         return {"topUsers": top_users, "total_bytes": total_bytes}
 
     def get_node_bandwidth(self, node_uuid: str, start_date: str, end_date: str, top_limit: int = 100) -> List[Dict]:

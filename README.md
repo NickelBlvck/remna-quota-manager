@@ -264,15 +264,22 @@ cd /opt/remna-quota-manager   # рядом должна быть data/quota.db �
 ```
 /start            — главное меню (только для telegram.admin_user_ids)
 📊 Статус         — dry-run флаг, кол-во limited/pending
-📈 Отчёт          — трафик по нодам за текущий период + топ-10 юзеров (⚠️ = превысил лимит)
+📈 Отчёт          — трафик по нодам за последние N дн. + топ-10 юзеров (моноширинная таблица, `!` = на лимите/выше)
 👥 Ограниченные   — список + кнопки разблокировки
 🔓 Разблокировать — тот же список ограниченных
 🛡 Whitelist      — просмотр + добавление UUID-исключений
 📋 Аудит          — последние 10 действий
 ```
 
-Кнопка `📈 Отчёт` строит статистику по требованию (окно = `billing.scan_window_dates`).
-Тот же отчёт за прошедшие сутки монитор шлёт автоматически в окно `daily_summary_hour`.
+Кнопка `📈 Отчёт` строит статистику по требованию за **скользящее окно**
+`subscription_cycle_days` (по умолчанию 30 дн.) — это НЕ личный биллинговый цикл
+юзера. Лимиты монитор применяет по циклу каждого (`billing.user_period_dates`),
+поэтому `%` в отчёте — оценочный. Тот же отчёт за прошедшие сутки монитор шлёт
+автоматически в окно `daily_summary_hour`.
+
+Данные берутся из `POST /api/bandwidth-stats/nodes/users` (тело `{"nodesUuids":[uuid]}`,
+`start`/`end` в формате `YYYY-MM-DD`). Ответ: `topUsers[].total` в байтах, поля с
+общим итогом нет — «всего» считается суммой `sparklineData` либо топа.
 
 ### Переключение dry-run
 ```bash
@@ -294,7 +301,9 @@ sudo systemctl restart remna-quota.service
 | `sqlite3.OperationalError: attempt to write a readonly database` | Права на папку `data/` | `sudo chown -R remna-quota:remna-quota data/` |
 | `status=203/EXEC` у сервиса | В `ExecStart` неверный путь к python venv | Проверь, что `/opt/remna-quota-manager/.venv/bin/python` существует |
 | `status=226/NAMESPACE`, `Failed to set up mount namespacing: .../data` | Каталог `data/` не существует, а он указан в `ReadWritePaths=` | `sudo mkdir -p /opt/remna-quota-manager/data && sudo chown remna-quota: /opt/remna-quota-manager/data` |
-| `API 404 GET /api/bandwidth-stats/.../users/{uuid}` | Несуществующий per-user эндпоинт | Использовать только `get_node_bandwidth()` (bulk) |
+| `API 404` на `/api/bandwidth-stats/...` | Per-user эндпоинта нет; актуальный — `POST /api/bandwidth-stats/nodes/users` с телом `{"nodesUuids":[...]}` | `get_node_bandwidth_stats()` уже шлёт POST + fallback на legacy GET |
+| В отчёте «всего: нет данных», но топ есть | Панель не отдаёт итог в этом ответе | Норма — «всего» досчитывается из `sparklineData`/топа; на суть не влияет |
+| Числа в `📈 Отчёт` кратно больше, чем в панели | Окно отчёта = `subscription_cycle_days` (напр. 30 дн.), а в панели выбран 1 день | Сравнивать за одинаковый период |
 | Отчёт не приходит | Неправильное окно времени | Проверить `daily_summary_hour` и `window_minutes` |
 | Пользователь не разблокируется | `billing_reset_at` не сохранён | Убедиться, что `add_limited()` передаёт `billing_reset_at` |
 | Дубли уведомлений | `should_send_daily_summary` без окна | Использовать проверку `minute < window` |
