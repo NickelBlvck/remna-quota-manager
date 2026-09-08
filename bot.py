@@ -137,9 +137,7 @@ class QuotaBot:
             text = f"❌ Не удалось собрать отчёт: {esc(str(e)[:200])}"
 
         kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
-        await query.edit_message_text(
-            text[:4000], parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
-        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
     async def _list_limited(self, query):
         limited = [u for u in self.db.list_limited() if not u.get("dry_run")]
