@@ -5,8 +5,10 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+import billing
 from nodes import resolve_monitored_nodes
 from notify import esc
+from reports import generate_traffic_report
 
 logger = logging.getLogger("bot")
 
@@ -49,6 +51,7 @@ class QuotaBot:
     async def _show_menu(self, update_or_query):
         keyboard = [
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
+            [InlineKeyboardButton("📈 Отчёт", callback_data="report")],
             [InlineKeyboardButton("👥 Ограниченные", callback_data="list_limited")],
             [InlineKeyboardButton("🔓 Разблокировать", callback_data="unblock_manual")],
             [InlineKeyboardButton("🛡 Whitelist", callback_data="whitelist_menu")],
@@ -73,6 +76,8 @@ class QuotaBot:
         try:
             if data == "status":
                 await self._show_status(query)
+            elif data == "report":
+                await self._show_report(query)
             elif data in ("list_limited", "unblock_manual"):
                 await self._list_limited(query)
             elif data.startswith("confirm_unblock:"):
@@ -110,6 +115,31 @@ class QuotaBot:
         )
         kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+
+    async def _show_report(self, query):
+        if not self.api:
+            await query.edit_message_text("❌ API not connected")
+            return
+        await query.edit_message_text("⏳ Собираю статистику по нодам…")
+
+        def _build() -> str:
+            cfg = dict(self.config)
+            cfg["monitored_nodes"] = resolve_monitored_nodes(self.api, self.config)
+            start, end = billing.scan_window_dates(self.config)
+            return generate_traffic_report(
+                self.api, cfg, start=start, end=end, title="Текущий период", top_n=10
+            )
+
+        try:
+            text = await asyncio.to_thread(_build)
+        except Exception as e:
+            logger.error("report failed: %s", e, exc_info=True)
+            text = f"❌ Не удалось собрать отчёт: {esc(str(e)[:200])}"
+
+        kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
+        await query.edit_message_text(
+            text[:4000], parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb)
+        )
 
     async def _list_limited(self, query):
         limited = [u for u in self.db.list_limited() if not u.get("dry_run")]
