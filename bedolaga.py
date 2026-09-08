@@ -75,42 +75,41 @@ class BedolagaAPI:
                     return val
         return []
 
+    @staticmethod
+    def _total(payload) -> Optional[int]:
+        if isinstance(payload, dict):
+            for key in ("total", "total_count", "count"):
+                v = payload.get(key)
+                if isinstance(v, int):
+                    return v
+        return None
+
+    def _paginate(self, path: str, page_size: int) -> Iterator[Dict[str, Any]]:
+        """Устойчиво к обоим стилям пагинации: шлём и limit/offset, и page/per_page."""
+        offset = 0
+        seen = 0
+        while True:
+            params = {
+                "limit": page_size, "per_page": page_size,
+                "offset": offset, "page": offset // page_size + 1,
+            }
+            payload = self._get(path, params)
+            items = self._items(payload)
+            if not items:
+                return
+            for it in items:
+                yield it
+            seen += len(items)
+            total = self._total(payload)
+            if len(items) < page_size:
+                return
+            if total is not None and seen >= total:
+                return
+            offset += page_size
+
     def iter_users(self, page_size: int = 200) -> Iterator[Dict[str, Any]]:
         """GET /users — каждый юзер несёт telegram_id + вложенную subscription."""
-        offset = 0
-        while True:
-            payload = self._get("/users", {"limit": page_size, "offset": offset})
-            items = self._items(payload)
-            if not items:
-                return
-            for it in items:
-                yield it
-            if len(items) < page_size:
-                return
-            offset += page_size
+        return self._paginate("/users", page_size)
 
-    def iter_subscriptions(
-        self, status: Optional[str] = None, page_size: int = 200
-    ) -> Iterator[Dict[str, Any]]:
-        offset = 0
-        while True:
-            params: Dict[str, Any] = {"limit": page_size, "offset": offset}
-            if status:
-                params["status"] = status
-            payload = self._get("/subscriptions", params)
-            items = self._items(payload)
-            if not items:
-                return
-            for it in items:
-                yield it
-            if len(items) < page_size:
-                return
-            offset += page_size
-
-    def active_subscriptions(self, statuses=("active", "trial")) -> List[Dict[str, Any]]:
-        seen: Dict[Any, Dict[str, Any]] = {}
-        for st in statuses:
-            for sub in self.iter_subscriptions(status=st):
-                sid = sub.get("id", id(sub))
-                seen.setdefault(sid, sub)
-        return list(seen.values())
+    def iter_subscriptions(self, page_size: int = 200) -> Iterator[Dict[str, Any]]:
+        return self._paginate("/subscriptions", page_size)
