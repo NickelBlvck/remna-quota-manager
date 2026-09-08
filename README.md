@@ -219,15 +219,17 @@ cd /opt && mkdir -p remna-quota-manager/data && cd remna-quota-manager
 # nodes.py, reports.py, billing.py, settings.py, utils_cost.py, db_tool.py,
 # config.json, requirements.txt, remna-quota.service
 
-# 3. Установить зависимости
-pip3 install -r requirements.txt
+# 3. Установить зависимости в venv (Debian 12+/PEP 668 — системный pip заблокирован)
+sudo apt install -y python3-venv python3-full
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
 # 4. Настроить конфиг
 nano config.json  # вставить токены, UUID сквадов, chat_id
 
-# 5. Отдельный системный пользователь + права для БД
+# 5. Отдельный системный пользователь + права
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin remna-quota
-sudo chown -R remna-quota:remna-quota /opt/remna-quota-manager/data
+sudo chown -R remna-quota:remna-quota /opt/remna-quota-manager
 sudo chmod 750 /opt/remna-quota-manager/data
 
 # 6. Установить systemd
@@ -248,20 +250,13 @@ sudo journalctl -u remna-quota.service -f --no-pager | grep -E "✅|🚨|Monitor
 
 ### CLI-утилита `db_tool.py`
 ```bash
-# Показать ограниченных
-python3 db_tool.py list
+cd /opt/remna-quota-manager   # рядом должна быть data/quota.db и config.json
 
-# Статистика
-python3 db_tool.py stats
-
-# Разблокировать вручную
-python3 db_tool.py unblock <uuid>
-
-# Аудит (последние 20 действий)
-python3 db_tool.py audit 20
-
-# Экспорт в JSON
-python3 db_tool.py export
+.venv/bin/python db_tool.py list          # показать ограниченных
+.venv/bin/python db_tool.py stats         # статистика
+.venv/bin/python db_tool.py unblock <uuid># разблокировать вручную
+.venv/bin/python db_tool.py audit 20      # последние действия
+.venv/bin/python db_tool.py export        # экспорт в JSON
 ```
 
 ### Telegram-бот
@@ -293,7 +288,9 @@ sudo systemctl restart remna-quota.service
 
 | Симптом | Причина | Решение |
 |---------|---------|---------|
+| `error: externally-managed-environment` при `pip install` | Debian 12+/PEP 668 | Ставить в venv: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` |
 | `sqlite3.OperationalError: attempt to write a readonly database` | Права на папку `data/` | `sudo chown -R remna-quota:remna-quota data/` |
+| `status=203/EXEC` у сервиса | В `ExecStart` неверный путь к python venv | Проверь, что `/opt/remna-quota-manager/.venv/bin/python` существует |
 | `API 404 GET /api/bandwidth-stats/.../users/{uuid}` | Несуществующий per-user эндпоинт | Использовать только `get_node_bandwidth()` (bulk) |
 | Отчёт не приходит | Неправильное окно времени | Проверить `daily_summary_hour` и `window_minutes` |
 | Пользователь не разблокируется | `billing_reset_at` не сохранён | Убедиться, что `add_limited()` передаёт `billing_reset_at` |
