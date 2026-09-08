@@ -98,6 +98,8 @@ def _verdict_tag(row) -> str:
     v = row["verdict"]
     if v == "limited":
         return "LIMITED"
+    if v == "approval":
+        return "АПРУВ?"
     if v == "whitelist":
         return "WL"
     if v == "over":
@@ -149,7 +151,7 @@ def format_evaluation(result, *, max_chars=3800) -> str:
         out += "\n<i>…список обрезан</i>"
     out += (
         "\n<i>! — залочит в ближайшую проверку · N/M — подтверждений подряд · "
-        "WL — whitelist · LIMITED — уже ограничен. Цикл у каждого свой "
-        "(от lastTrafficResetAt).</i>"
+        "АПРУВ? — ждёт решения админа · WL — whitelist · LIMITED — уже ограничен. "
+        "Цикл у каждого свой.</i>"
     )
     return out

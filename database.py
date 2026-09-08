@@ -85,6 +85,23 @@ class QuotaDatabase:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS pending_approvals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL,
+                    node_uuid TEXT NOT NULL,
+                    period_key TEXT NOT NULL,
+                    username TEXT,
+                    node_name TEXT,
+                    traffic_gb REAL,
+                    limit_gb REAL,
+                    billing_reset_at TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    decided_by INTEGER,
+                    status TEXT NOT NULL DEFAULT 'waiting',
+                    UNIQUE (uuid, node_uuid, period_key)
+                );
+
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -205,6 +222,82 @@ class QuotaDatabase:
 
     def set_dry_run(self, enabled: bool) -> None:
         self.set_setting("dry_run", "true" if enabled else "false")
+
+    def enforcement_mode(self, config_default: str = "manual") -> str:
+        """'manual' — блокировка только по апруву админа; 'auto' — сразу."""
+        raw = (self.get_setting("enforcement_mode") or config_default or "manual").lower()
+        return "auto" if raw == "auto" else "manual"
+
+    def set_enforcement_mode(self, mode: str) -> None:
+        self.set_setting("enforcement_mode", "auto" if mode == "auto" else "manual")
+
+    # ---- pending_approvals -------------------------------------------------
+
+    def request_approval(
+        self, uuid: str, username: str, node_uuid: str, node_name: str,
+        traffic_gb: float, limit_gb: float, *, period_key: str,
+        billing_reset_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Создать (или вернуть существующую) заявку на блокировку."""
+        uuid = uuid.lower()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pending_approvals
+                (uuid, node_uuid, period_key, username, node_name, traffic_gb,
+                 limit_gb, billing_reset_at, created_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+                ON CONFLICT(uuid, node_uuid, period_key) DO UPDATE SET
+                    username = excluded.username,
+                    traffic_gb = excluded.traffic_gb,
+                    limit_gb = excluded.limit_gb
+                """,
+                (uuid, node_uuid, period_key, username, node_name, traffic_gb,
+                 limit_gb, billing_reset_at, _utcnow_iso()),
+            )
+            row = conn.execute(
+                "SELECT * FROM pending_approvals WHERE uuid=? AND node_uuid=? AND period_key=?",
+                (uuid, node_uuid, period_key),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def approval_status(self, uuid: str, node_uuid: str, period_key: str) -> Optional[str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM pending_approvals WHERE uuid=? AND node_uuid=? AND period_key=?",
+                (uuid.lower(), node_uuid, period_key),
+            ).fetchone()
+        return row["status"] if row else None
+
+    def get_approval(self, approval_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def decide_approval(self, approval_id: int, status: str, decided_by: Optional[int] = None) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE pending_approvals SET status=?, decided_at=?, decided_by=? "
+                "WHERE id=? AND status='waiting'",
+                (status, _utcnow_iso(), decided_by, approval_id),
+            )
+        return cur.rowcount > 0
+
+    def list_waiting_approvals(self) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pending_approvals WHERE status='waiting' ORDER BY created_at"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge_stale_approvals(self, before_period: str) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM pending_approvals WHERE period_key < ?", (before_period,)
+            )
+        return cur.rowcount
 
     def audit(
         self,
@@ -353,6 +446,13 @@ class QuotaDatabase:
             else:
                 cur = conn.execute("DELETE FROM limited_users WHERE uuid = ?", (uuid.lower(),))
             conn.execute("DELETE FROM pending_limits WHERE uuid = ?", (uuid.lower(),))
+            if node_uuid:
+                conn.execute(
+                    "DELETE FROM pending_approvals WHERE uuid = ? AND node_uuid = ?",
+                    (uuid.lower(), node_uuid),
+                )
+            else:
+                conn.execute("DELETE FROM pending_approvals WHERE uuid = ?", (uuid.lower(),))
         return cur.rowcount
 
     def list_pending(self) -> List[Dict[str, Any]]:

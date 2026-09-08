@@ -17,6 +17,7 @@ def load_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
         },
         "actions_enabled": True,
         "dry_run": True,
+        "enforcement_mode": "manual",
         "limit_buffer_percent": 0,
         "limit_hysteresis_checks": 2,
         "check_interval_minutes": 10,
@@ -69,6 +70,8 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("telegram.admin_user_ids must contain at least one administrator")
     if config.get("dry_run") is False and not config.get("actions_enabled", True):
         logger.warning("actions_enabled=false overrides dry_run=false")
+    if config.get("enforcement_mode", "manual") not in ("manual", "auto"):
+        raise ValueError("enforcement_mode must be 'manual' or 'auto'")
     billing = config.get("billing") or {}
     if int(billing.get("subscription_cycle_days", 30)) <= 0:
         raise ValueError("billing.subscription_cycle_days must be positive")

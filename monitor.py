@@ -71,6 +71,7 @@ class TrafficMonitor:
         sub = billing.is_subscription_mode(self.config)
         pending = {(p["uuid"], p["node_uuid"]): p["checks_count"] for p in self.db.list_pending()}
         limited = {(r["uuid"], r["node_uuid"]) for r in self.db.list_enforced_limited()}
+        approvals = {(a["uuid"], a["node_uuid"]): "waiting" for a in self.db.list_waiting_approvals()}
 
         rows = []
         for node_cfg in nodes:
@@ -141,6 +142,8 @@ class TrafficMonitor:
                 over = (traffic or 0) >= u_eff
                 if (lu, node_uuid) in limited:
                     verdict = "limited"
+                elif approvals.get((lu, node_uuid)) == "waiting":
+                    verdict = "approval"
                 elif self.db.is_whitelisted(lu):
                     verdict = "whitelist" if over else "ok"
                 else:
@@ -290,6 +293,23 @@ class TrafficMonitor:
         except Exception as e:
             logger.error("Daily summary failed: %s", e, exc_info=True)
 
+    def _notify_approval_request(self, appr: dict, username, node_name, traffic_gb, limit_gb):
+        aid = appr.get("id")
+        if not aid:
+            logger.error("approval row without id, notification skipped")
+            return
+        pct = (traffic_gb / float(limit_gb) * 100) if limit_gb else 0
+        text = (
+            f"⚠️ <b>Заявка на блокировку</b>\n\n"
+            f"👤 <code>{esc(username)}</code>\n"
+            f"🌐 <code>{esc(node_name)}</code>\n"
+            f"📊 <code>{traffic_gb:.1f}</code> / <code>{esc(limit_gb)}</code> GB "
+            f"(<b>{pct:.0f}%</b>)\n\n"
+            f"<i>Ручной режим: блокировка не применена. Реши кнопкой ниже.</i>"
+        )
+        if not self.notifier.send_approval_request(text, int(aid)):
+            logger.error("approval request notification not delivered (id=%s)", aid)
+
     def _notify_verification_pending(self, username, node_name, traffic_gb, limit_gb, checks, need, dry):
         mode = "dry-run" if dry else "⚡ боевой"
         self._send_alert_sync(
@@ -405,6 +425,7 @@ class TrafficMonitor:
         self.check_cycle_unblocks()
         current = self.db.current_period_key()
         removed = self.db.purge_stale_pending(current)
+        self.db.purge_stale_approvals(current)
         logger.info("Monthly reset job done, purged %s stale pending rows", removed)
 
     def run_loop(self):
@@ -417,6 +438,7 @@ class TrafficMonitor:
                 self.check_cycle_unblocks()
                 self.check_limits()
                 self.check_daily_summary()
+                self.db.purge_stale_approvals(self.db.current_period_key())
             except Exception as e:
                 logger.error("Loop error: %s", e, exc_info=True)
             time.sleep(interval)
@@ -538,7 +560,27 @@ class TrafficMonitor:
                 self._notify_verification_passed(username, node_name, traffic_gb, user_limit_gb, dry=True)
                 continue
 
-            # РЕАЛЬНОЕ ДЕЙСТВИЕ
+            # Ручной режим: не блокируем сами — заводим заявку и ждём апрув
+            if self.db.enforcement_mode(self.config.get("enforcement_mode", "manual")) == "manual":
+                status = self.db.approval_status(user_uuid, node_uuid, period_key)
+                if status in ("skipped", "approved"):
+                    self.db.clear_pending(user_uuid, node_uuid, period_key)
+                    continue
+                if status == "waiting":
+                    continue  # уже спросили, ждём
+                appr = self.db.request_approval(
+                    user_uuid, username, node_uuid, node_name, traffic_gb, user_limit_gb,
+                    period_key=period_key, billing_reset_at=billing_reset,
+                )
+                self.db.clear_pending(user_uuid, node_uuid, period_key)
+                self.db.audit(
+                    "limit_approval_requested", user_uuid=user_uuid, username=username, node_name=node_name,
+                    details={"traffic_gb": traffic_gb, "limit_gb": user_limit_gb, "approval_id": appr.get("id")},
+                )
+                self._notify_approval_request(appr, username, node_name, traffic_gb, user_limit_gb)
+                continue
+
+            # РЕАЛЬНОЕ ДЕЙСТВИЕ (auto)
             if self.api.set_user_external_squad(user_uuid, limited_external, remove_from_all=True):
                 self.db.add_limited(
                     user_uuid, username, node_uuid, node_name,

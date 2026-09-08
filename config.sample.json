@@ -35,6 +35,7 @@
   },
   "actions_enabled": true,
   "dry_run": true,
+  "enforcement_mode": "manual",
   "limit_buffer_percent": 0,
   "limit_hysteresis_checks": 2,
   "check_interval_minutes": 10,

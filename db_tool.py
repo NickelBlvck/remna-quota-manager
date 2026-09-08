@@ -46,8 +46,9 @@ def main():
             print(f"{u['uuid']:<36} | {str(u['username'] or ''):<20} | {str(u['node_name'] or ''):<15}")
             
     elif cmd == "stats":
-        print(f"Limited: {len(db.list_limited())}")
-        print(f"Pending: {len(db.list_pending())}")
+        print(f"Limited:  {len(db.list_limited())}")
+        print(f"Pending:  {len(db.list_pending())}")
+        print(f"Approvals waiting: {len(db.list_waiting_approvals())}")
         print(f"Whitelist: {len(db.list_whitelist())}")
         
     elif cmd == "unblock":

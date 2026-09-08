@@ -231,6 +231,66 @@ class BedolagaTests(unittest.TestCase):
         self.assertFalse(any(r["username"] == "legacy_guy" for r in m2.evaluate()["rows"]))
 
 
+class ApprovalFlowTests(unittest.TestCase):
+    def test_manual_mode_creates_approval_and_does_not_enforce(self):
+        from monitor import TrafficMonitor
+        GB = 1024 ** 3
+        calls = []
+
+        class FakeRemna:
+            def get_users(self, limit=5000):
+                return [{"uuid": "ru-1", "username": "hog",
+                         "createdAt": "2026-08-25T00:00:00Z"}]
+
+            def get_nodes(self):
+                return []
+
+            def get_user(self, uuid):
+                return None
+
+            def get_node_bandwidth(self, node_uuid, start, end, top_limit=100):
+                return [{"username": "hog", "uuid": "ru-1", "total": 90 * GB}]
+
+            def get_user_period_traffic_gb(self, user, node_uuid, s, e):
+                return 90.0
+
+            def set_user_external_squad(self, *a, **k):
+                calls.append(a)
+                return True
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        db = QuotaDatabase(path)
+        cfg = {
+            "billing": {"mode": "subscription", "subscription_cycle_days": 30},
+            "monitored_nodes": [{"uuid": "n1", "name": "n1", "limit_gb": 50,
+                                 "limited_external_squad_uuid": "lim-1"}],
+            "dry_run": False, "enforcement_mode": "manual",
+            "limit_hysteresis_checks": 1,
+        }
+        m = TrafficMonitor(FakeRemna(), db, cfg)
+        m._build_user_map()
+        m.check_limits()
+
+        self.assertEqual(calls, [])                       # nothing enforced
+        waiting = db.list_waiting_approvals()
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0]["username"], "hog")
+        self.assertEqual(db.list_limited(), [])          # not limited yet
+
+        # second pass must not create a duplicate
+        m.check_limits()
+        self.assertEqual(len(db.list_waiting_approvals()), 1)
+
+        # skip -> exempt for the cycle, still not limited
+        aid = waiting[0]["id"]
+        self.assertTrue(db.decide_approval(aid, "skipped", 1))
+        m.check_limits()
+        self.assertEqual(db.list_limited(), [])
+        self.assertEqual(calls, [])
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):

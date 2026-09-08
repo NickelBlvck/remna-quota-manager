@@ -24,11 +24,12 @@ class TelegramNotifier:
         self.summary_hour = int(tg.get("daily_summary_hour", 9))
         self.summary_window = int(tg.get("daily_summary_window_minutes", 5))
 
-    def _send(self, chat_id, text, topic_id=None):
+    def _send(self, chat_id, text, topic_id=None, reply_markup=None):
         if not self.token or not chat_id: return False
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if topic_id: payload["message_thread_id"] = int(topic_id)
+        if reply_markup: payload["reply_markup"] = reply_markup
 
         try:
             r = requests.post(url, json=payload, timeout=10)
@@ -39,6 +40,21 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
             return False
+
+    def send_approval_request(self, text, approval_id: int):
+        """Заявка на блокировку с кнопками — в приват и в топик."""
+        kb = {"inline_keyboard": [[
+            {"text": "🔒 Заблокировать", "callback_data": f"appr:ok:{approval_id}"},
+            {"text": "⏭ Пропустить цикл", "callback_data": f"appr:skip:{approval_id}"},
+        ], [
+            {"text": "🛡 В whitelist", "callback_data": f"appr:wl:{approval_id}"},
+        ]]}
+        sent = False
+        if self.private_chat_id:
+            sent = self._send(self.private_chat_id, text, reply_markup=kb) or sent
+        if self.alerts_chat_id:
+            sent = self._send(self.alerts_chat_id, text, self.alerts_topic_id, reply_markup=kb) or sent
+        return sent
 
     def send_limit_event(self, text):
         """Шлем уведомление о лимите (приват + канал)"""

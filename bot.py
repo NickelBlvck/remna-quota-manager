@@ -49,8 +49,11 @@ class QuotaBot:
             return set()
 
     async def _show_menu(self, update_or_query):
+        waiting = len(self.db.list_waiting_approvals()) if self.db else 0
+        appr_label = f"⏳ Заявки ({waiting})" if waiting else "⏳ Заявки"
         keyboard = [
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
+            [InlineKeyboardButton(appr_label, callback_data="approvals")],
             [InlineKeyboardButton("📈 Отчёт", callback_data="report")],
             [InlineKeyboardButton("🎯 Проверка циклов", callback_data="check")],
             [InlineKeyboardButton("👥 Ограниченные", callback_data="list_limited")],
@@ -81,6 +84,11 @@ class QuotaBot:
                 await self._show_report(query)
             elif data == "check":
                 await self._show_check(query)
+            elif data == "approvals":
+                await self._show_approvals(query)
+            elif data.startswith("appr:"):
+                _, action, aid = data.split(":", 2)
+                await self._decide_approval(query, action, int(aid))
             elif data in ("list_limited", "unblock_manual"):
                 await self._list_limited(query)
             elif data.startswith("confirm_unblock:"):
@@ -107,14 +115,18 @@ class QuotaBot:
             return
 
         dry = self.db.is_dry_run(self.config.get("dry_run", True))
+        mode = self.db.enforcement_mode(self.config.get("enforcement_mode", "manual"))
         limited_count = len(self.db.list_limited())
         pending_count = len(self.db.list_pending())
+        waiting_count = len(self.db.list_waiting_approvals())
 
         msg = (
             f"📊 <b>System Status</b>\n\n"
             f"🔧 Dry Run: <code>{dry}</code>\n"
+            f"🎛 Режим: <code>{esc(mode)}</code>\n"
             f"🔒 Limited: <code>{limited_count}</code>\n"
             f"⏳ Pending: <code>{pending_count}</code>\n"
+            f"📨 Заявок на апрув: <code>{waiting_count}</code>\n"
         )
         kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
@@ -154,6 +166,102 @@ class QuotaBot:
             text = f"❌ Не удалось: {esc(str(e)[:200])}"
         kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+
+    async def _show_approvals(self, query):
+        rows = self.db.list_waiting_approvals()
+        if not rows:
+            kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
+            await query.edit_message_text(
+                "✅ Заявок на блокировку нет.", reply_markup=InlineKeyboardMarkup(kb)
+            )
+            return
+        msg = f"⏳ <b>Заявки на блокировку ({len(rows)})</b>\n\n"
+        kb = []
+        for r in rows[:10]:
+            t, lim = r.get("traffic_gb") or 0, r.get("limit_gb") or 0
+            pct = f"{t / float(lim) * 100:.0f}%" if lim else "?"
+            msg += (
+                f"👤 <code>{esc(r.get('username') or r['uuid'][:8])}</code> · "
+                f"<code>{esc(r.get('node_name') or '?')}</code> · "
+                f"{t:.1f}/{esc(lim)} GB ({pct})\n"
+            )
+            uname = (r.get("username") or r["uuid"])[:14]
+            kb.append([
+                InlineKeyboardButton(f"🔒 {uname}", callback_data=f"appr:ok:{r['id']}"),
+                InlineKeyboardButton("⏭", callback_data=f"appr:skip:{r['id']}"),
+                InlineKeyboardButton("🛡", callback_data=f"appr:wl:{r['id']}"),
+            ])
+        kb.append([InlineKeyboardButton("↩️ Назад", callback_data="back")])
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+
+    async def _decide_approval(self, query, action: str, approval_id: int):
+        appr = self.db.get_approval(approval_id)
+        if not appr:
+            await query.edit_message_text("❌ Заявка не найдена.")
+            return
+        if appr["status"] != "waiting":
+            await query.edit_message_text(
+                f"ℹ️ Заявка уже обработана: <code>{esc(appr['status'])}</code>", parse_mode="HTML"
+            )
+            return
+
+        uuid = appr["uuid"]
+        uname = esc(appr.get("username") or uuid[:8])
+        by = query.from_user.id
+
+        if action == "wl":
+            await asyncio.to_thread(self.db.add_whitelist, uuid, f"approval #{approval_id}")
+            self.db.decide_approval(approval_id, "skipped", by)
+            self.db.audit("limit_approval_whitelist", user_uuid=uuid,
+                          username=appr.get("username"), node_name=appr.get("node_name"),
+                          details={"by": by})
+            await query.edit_message_text(f"🛡 <code>{uname}</code> добавлен в whitelist, блокировка отменена.",
+                                          parse_mode="HTML")
+            return
+
+        if action == "skip":
+            self.db.decide_approval(approval_id, "skipped", by)
+            self.db.audit("limit_approval_skipped", user_uuid=uuid,
+                          username=appr.get("username"), node_name=appr.get("node_name"),
+                          details={"by": by})
+            await query.edit_message_text(
+                f"⏭ <code>{uname}</code> пропущен до конца цикла.", parse_mode="HTML"
+            )
+            return
+
+        # action == "ok" -> enforce
+        nodes = await asyncio.to_thread(resolve_monitored_nodes, self.api, self.config)
+        node = next((n for n in nodes if n.get("uuid") == appr["node_uuid"]), None) or \
+            next((n for n in nodes if n.get("name") == appr.get("node_name")), None) or {}
+        limited_squad = node.get("limited_external_squad_uuid")
+        if not limited_squad:
+            await query.edit_message_text(
+                f"❌ Нет limited_external_squad_uuid для <code>{esc(appr.get('node_name'))}</code>.",
+                parse_mode="HTML",
+            )
+            return
+
+        ok = await asyncio.to_thread(self.api.set_user_external_squad, uuid, limited_squad, True)
+        if not ok:
+            await query.edit_message_text("❌ Панель не подтвердила блокировку.")
+            return
+
+        def _persist():
+            self.db.add_limited(
+                uuid, appr.get("username"), appr["node_uuid"], appr.get("node_name"),
+                appr.get("traffic_gb"), appr.get("limit_gb"),
+                period_key=appr["period_key"], billing_reset_at=appr.get("billing_reset_at"),
+            )
+        await asyncio.to_thread(_persist)
+        self.db.decide_approval(approval_id, "approved", by)
+        self.db.audit("limit_enforce", user_uuid=uuid, username=appr.get("username"),
+                      node_name=appr.get("node_name"),
+                      details={"traffic_gb": appr.get("traffic_gb"), "limit_gb": appr.get("limit_gb"),
+                               "via": "approval", "by": by})
+        await query.edit_message_text(
+            f"🔒 <code>{uname}</code> заблокирован на <code>{esc(appr.get('node_name'))}</code>.",
+            parse_mode="HTML",
+        )
 
     async def _list_limited(self, query):
         limited = [u for u in self.db.list_limited() if not u.get("dry_run")]
