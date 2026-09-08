@@ -1,0 +1,51 @@
+{
+  "panel": {
+    "base_url": "https://panel.example.com",
+    "token": "PUT_PANEL_TOKEN_HERE"
+  },
+  "telegram": {
+    "bot_token": "PUT_TELEGRAM_BOT_TOKEN_HERE",
+    "private_chat_id": 123456789,
+    "alerts_chat_id": -1009876543210,
+    "alerts_topic_id": 55,
+    "admin_user_ids": [123456789],
+    "daily_summary_hour": 9,
+    "daily_summary_window_minutes": 5
+  },
+  "nodes": {
+    "auto_discover": true,
+    "include_disabled": false,
+    "policies": {
+      "11111111-1111-1111-1111-111111111111": {
+        "limit_gb": 50,
+        "full_external_squad_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "limited_external_squad_uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      },
+      "22222222-2222-2222-2222-222222222222": {
+        "limit_gb": 40,
+        "full_external_squad_uuid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        "limited_external_squad_uuid": "dddddddd-dddd-dddd-dddd-dddddddddddd"
+      },
+      "33333333-3333-3333-3333-333333333333": {
+        "limit_gb": 30,
+        "full_external_squad_uuid": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        "limited_external_squad_uuid": "ffffffff-ffff-ffff-ffff-ffffffffffff"
+      }
+    }
+  },
+  "actions_enabled": true,
+  "dry_run": true,
+  "limit_buffer_percent": 0,
+  "limit_hysteresis_checks": 2,
+  "check_interval_minutes": 10,
+  "users_page_size": 5000,
+  "bandwidth_page_size": 5000,
+  "traffic_cost": {
+    "currency": "₽",
+    "price_per_gb": 0
+  },
+  "billing": {
+    "mode": "subscription",
+    "subscription_cycle_days": 30
+  }
+}

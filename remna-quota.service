@@ -1,0 +1,20 @@
+[Unit]
+Description=Remnawave Quota Manager Service
+After=network.target
+
+[Service]
+Type=simple
+User=remna-quota
+Group=remna-quota
+WorkingDirectory=/opt/remna-quota-manager
+ExecStart=/usr/bin/python3 /opt/remna-quota-manager/main.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/remna-quota-manager/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

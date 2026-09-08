@@ -1,0 +1,213 @@
+import requests
+import time
+import logging
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+class RemnawaveAPI:
+    def __init__(self, base_url: str, token: str, timeout: int = 15):
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+
+    _RETRYABLE = (429, 500, 502, 503, 504)
+
+    def _request(self, method: str, path: str, **kwargs):
+        url = f"{self.base_url}{path}"
+        for attempt in range(3):
+            try:
+                response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            except requests.exceptions.RequestException as e:
+                if attempt == 2:
+                    logger.error(f"Request failed: {method} {path} - {e}")
+                    return None
+                time.sleep(2 ** attempt)
+                continue
+
+            if response.status_code >= 400:
+                logger.error(f"API {response.status_code} {method} {path}: {response.text[:300]}")
+
+            if response.status_code in self._RETRYABLE:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                return None
+
+            if response.status_code >= 400:
+                # Non-retryable client error (400/401/403/404/...): retrying is pointless.
+                return None
+
+            try:
+                data = response.json()
+            except ValueError as e:
+                logger.error(f"JSON parse failed: {e}")
+                return None
+            if isinstance(data, dict):
+                return data.get('response', data)
+            return data
+        return None
+
+    def get_users(self, limit: int = 500) -> List[Dict]:
+        raw = self._request('GET', f'/api/users?limit={limit}')
+        if isinstance(raw, dict) and 'users' in raw:
+            return raw['users']
+        return raw if isinstance(raw, list) else []
+
+    def get_nodes(self) -> List[Dict]:
+        """Return the current node list from the panel."""
+        raw = self._request("GET", "/api/nodes")
+        if isinstance(raw, dict) and isinstance(raw.get("nodes"), list):
+            return raw["nodes"]
+        return raw if isinstance(raw, list) else []
+
+    def get_user(self, user_uuid: str) -> Optional[Dict]:
+        result = self._request('GET', f'/api/users/{user_uuid}')
+        if isinstance(result, dict):
+            if 'users' in result and isinstance(result['users'], list) and result['users']:
+                return result['users'][0]
+            if 'uuid' in result:
+                return result
+        return result if isinstance(result, dict) else None
+
+    def get_node_bandwidth_stats(
+        self, node_uuid: str, start_date: str, end_date: str, top_limit: int = 100
+    ) -> Dict:
+        result = self._request(
+            "GET", f"/api/bandwidth-stats/nodes/{node_uuid}/users",
+            params={"start": start_date, "end": end_date, "topUsersLimit": str(top_limit)},
+        )
+        if not result or not isinstance(result, dict):
+            return {"topUsers": [], "total_bytes": None}
+        top_users = result.get("topUsers", [])
+        total_bytes = None
+        for key in ("total", "totalBytes", "totalTraffic", "bandwidthTotal"):
+            if result.get(key) is not None:
+                total_bytes = int(result[key])
+                break
+        return {"topUsers": top_users, "total_bytes": total_bytes}
+
+    def get_node_bandwidth(self, node_uuid: str, start_date: str, end_date: str, top_limit: int = 100) -> List[Dict]:
+        return self.get_node_bandwidth_stats(node_uuid, start_date, end_date, top_limit)["topUsers"]
+
+    def get_user_node_traffic_bytes(
+        self, user_uuid: str, node_uuid: str, start_date: str, end_date: str,
+        username: Optional[str] = None,
+    ) -> Optional[int]:
+        """Трафик пользователя: только через рабочий bulk-эндпоинт"""
+        top_users = self.get_node_bandwidth(node_uuid, start_date, end_date, top_limit=500)
+        
+        if username:
+            for u in top_users:
+                if u.get("username") == username:
+                    return int(u.get("total", 0))
+        
+        for u in top_users:
+            if u.get("uuid") == user_uuid:
+                return int(u.get("total", 0))
+        
+        logger.debug(f"User {username or user_uuid[:8]}... not found in topUsers for node {node_uuid[:8]}")
+        return None
+
+    def get_user_period_traffic_gb(
+        self, user: Dict[str, Any], node_uuid: str, start_date: str, end_date: str,
+    ) -> Optional[float]:
+        uuid = user.get("uuid")
+        if not uuid:
+            return None
+        # Must be per-node traffic: the user object's usedTrafficBytes is the
+        # global total across every node and would over-count against a single
+        # node's limit_gb.
+        raw = self.get_user_node_traffic_bytes(uuid, node_uuid, start_date, end_date, username=user.get("username"))
+        if raw is None:
+            return None
+        return raw / (1024**3)
+
+    def get_user_current_squads(self, user_uuid: str) -> Dict[str, List[str]]:
+        user = self.get_user(user_uuid)
+        if not user:
+            return {'internal': [], 'external': []}
+        internal = [s.get('uuid') for s in (user.get('activeInternalSquads') or []) if isinstance(s, dict) and s.get('uuid')]
+        external = [s.get('uuid') for s in (user.get('activeExternalSquads') or []) if isinstance(s, dict) and s.get('uuid')]
+        return {'internal': internal, 'external': external}
+
+    def bulk_action_squad(self, squad_uuid: str, action: str, user_uuids: List[str], squad_type: str = 'internal') -> bool:
+        if not squad_uuid or action not in {"add", "remove"} or not user_uuids:
+            return False
+        path = f'/api/{squad_type}-squads/{squad_uuid}/bulk-actions/{action}-users'
+        result = self._request('POST', path, json={"userUuids": user_uuids})
+        return result is not None
+
+    def set_user_external_squads(
+        self, user_uuid: str, target_uuids, remove_from_all: bool = True
+    ) -> bool:
+        """Make the user's external-squad membership exactly ``target_uuids``.
+
+        Used when a user is limited/unblocked on several nodes at once: pass
+        every full (or limited) squad they should end up in, in one call, so
+        one node's update doesn't kick them out of another node's squad.
+        """
+        targets = {str(u).strip() for u in (target_uuids or []) if u and str(u).strip()}
+        current = set(self.get_user_current_squads(user_uuid).get("external", []))
+        logger.info(
+            "External squads for %s...: %s -> %s",
+            user_uuid[:8],
+            sorted(s[:8] for s in current),
+            sorted(s[:8] for s in targets),
+        )
+
+        success = True
+        if remove_from_all:
+            for cur_uuid in current - targets:
+                if not self.bulk_action_squad(cur_uuid, "remove", [user_uuid], "external"):
+                    logger.warning("   Failed to remove from external squad %s", cur_uuid[:8])
+                    success = False
+        for tgt in targets - current:
+            if not self.bulk_action_squad(tgt, "add", [user_uuid], "external"):
+                logger.error("   Failed to add to external squad %s", tgt[:8])
+                success = False
+
+        # Confirm the panel reflects the intended state before reporting success.
+        updated = set(self.get_user_current_squads(user_uuid).get("external", []))
+        if not targets.issubset(updated):
+            logger.error("Panel did not confirm target external squads for %s", user_uuid[:8])
+            success = False
+        if remove_from_all and (updated - targets):
+            logger.error(
+                "Panel still has extra external squads for %s: %s",
+                user_uuid[:8], sorted(s[:8] for s in updated - targets),
+            )
+            success = False
+
+        if success:
+            logger.info("   External squads updated for %s...", user_uuid[:8])
+        return success
+
+    def set_user_external_squad(
+        self, user_uuid: str, target_external_uuid: Optional[str], remove_from_all: bool = True
+    ) -> bool:
+        target = (target_external_uuid or "").strip()
+        return self.set_user_external_squads(
+            user_uuid, [target] if target else [], remove_from_all=remove_from_all
+        )
+
+    def move_user_to_squads(self, user_uuid: str, target_squads: Dict[str, str], remove_from_all: bool = True) -> bool:
+        external = target_squads.get("external")
+        if target_squads.get("internal"):
+            logger.warning("internal squad ignored — quota uses external squads only")
+        return self.set_user_external_squad(user_uuid, external, remove_from_all=remove_from_all)
+
+    def reset_user_traffic(self, user_uuid: str) -> bool:
+        for ep in [f'/api/users/{user_uuid}/actions/reset-traffic', f'/api/users/{user_uuid}/reset-traffic']:
+            if self._request('POST', ep):
+                return True
+        return False
+
+    def get_internal_squads(self) -> List[Dict]:
+        result = self._request('GET', '/api/internal-squads')
+        return result if isinstance(result, list) else []
