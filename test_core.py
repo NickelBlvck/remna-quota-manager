@@ -23,6 +23,24 @@ class BillingTests(unittest.TestCase):
             {"billing": {"mode": "subscription", "subscription_cycle_days": 30}},
         ))
 
+    def test_cycle_anchor_rolls_forward_from_created_at(self):
+        cfg = {"billing": {"mode": "subscription", "subscription_cycle_days": 30}}
+        created = datetime.now(timezone.utc) - timedelta(days=75)  # 2.5 cycles ago
+        anchor = billing.cycle_anchor({"createdAt": created.isoformat()}, cfg)
+        # anchor is the start of the current cycle: created + 60d (2 whole cycles)
+        self.assertEqual(anchor, created + timedelta(days=60))
+        start, end = billing.user_period_dates({"createdAt": created.isoformat()}, cfg)
+        self.assertEqual(start, (created + timedelta(days=60)).strftime("%Y-%m-%d"))
+        self.assertEqual(end, (created + timedelta(days=90)).strftime("%Y-%m-%d"))
+
+    def test_no_reset_user_unblocks_after_one_cycle(self):
+        cfg = {"billing": {"mode": "subscription", "subscription_cycle_days": 30}}
+        # limited 40 days ago, no lastTrafficResetAt anywhere -> must still unblock
+        info = {"limited_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()}
+        self.assertTrue(billing.should_unblock_user(info, {}, cfg))
+        info_recent = {"limited_at": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()}
+        self.assertFalse(billing.should_unblock_user(info_recent, {}, cfg))
+
 
 class DatabaseTests(unittest.TestCase):
     def _db(self) -> QuotaDatabase:

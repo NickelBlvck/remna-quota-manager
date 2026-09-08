@@ -9,7 +9,7 @@
 | Проблема | Решение |
 |----------|---------|
 | Пользователь превысил лимит → продолжает тратить трафик | Автоматическое переключение в `limited_external_squad` с ограниченным доступом |
-| Все разблокируются 1-го числа → несправедливо для подключившихся в середине месяца | **Персональный цикл**: +30 дней от `lastTrafficResetAt` каждого пользователя |
+| Все разблокируются 1-го числа → несправедливо для подключившихся в середине месяца | **Персональный цикл**: катящийся anchor от `lastTrafficResetAt`/`createdAt` каждого пользователя |
 | Ложные срабатывания из-за скачков трафика | **Hysteresis**: нужно 2 подтверждения подряд перед применением лимита |
 | Нельзя тестировать на боевых юзерах | **Dry-run режим**: логирование без реальных действий |
 | Нужно видеть, кто и когда был ограничен | **SQLite аудит**: полная история действий + CLI-утилита `db_tool.py` |
@@ -64,17 +64,26 @@ kv_settings      -- флаги типа dry_run, last_daily_summary_date
 whitelist        -- UUID, которых никогда не лимитить
 ```
 
-### 3. Персональный цикл разблокировки (+30 дней)
-**Почему**: Глобальный сброс 1-го числа создаёт дисбаланс: подключившийся 25-го числа получает ~35 дней, а подключившийся 5-го — ~25.
+### 3. Персональный цикл (катящийся anchor)
 
-**Логика** (`billing.py`):
+**Почему**: Глобальный сброс 1-го числа создаёт дисбаланс: подключившийся 25-го получает ~35 дней, подключившийся 5-го — ~25.
+
+**Важно про Remnawave**: native-сброс трафика бывает только `MONTHLY` (1-е число, для всех),
+`WEEKLY`, `DAILY` или `NO_RESET`. «30 дней от даты подписки» в панели нет. Поэтому
+`billing.py` считает цикл сам — катящимся якорем:
+
 ```python
-# Для каждого пользователя:
-reset_date = user['lastTrafficResetAt'] or user['createdAt']
-unblock_date = reset_date + timedelta(days=30)  # или subscription_cycle_days из конфига
+base   = user['lastTrafficResetAt'] or user['createdAt']   # или Bedolaga start_date
+k      = (now - base).days // subscription_cycle_days       # сколько полных циклов прошло
+anchor = base + k * subscription_cycle_days                 # начало ТЕКУЩЕГО цикла
+window = (anchor, anchor + subscription_cycle_days)         # окно для подсчёта трафика
 ```
 
-**Хранение**: `billing_reset_at` в таблице `limited_users` → точная привязка к циклу.
+- **MONTHLY-юзеры**: `lastTrafficResetAt` двигает панель → `k=0`, `anchor` = последний сброс. Совпадает с панелью.
+- **NO_RESET / без `lastTrafficResetAt`**: якорь катится от `createdAt` — окно не застревает, юзер не залипает в limited навсегда.
+- **Разблокировка**: `should_unblock_user` = прошло ли `subscription_cycle_days` от начала того цикла, в котором ограничили (`period_key` на момент лимита → фолбэк `billing_reset_at` → `limited_at`).
+
+**Хранение**: `period_key` (= anchor того цикла) + `billing_reset_at` в `limited_users`.
 
 ### 4. Верификация лимита (hysteresis)
 **Почему**: Скачки трафика, баги сбора статистики, временные пики — не должны приводить к блокировке.
@@ -307,7 +316,7 @@ sudo systemctl restart remna-quota.service
 | В отчёте «всего: нет данных», но топ есть | Панель не отдаёт итог в этом ответе | Норма — «всего» досчитывается из `sparklineData`/топа; на суть не влияет |
 | Числа в `📈 Отчёт` кратно больше, чем в панели | Окно отчёта = `subscription_cycle_days` (напр. 30 дн.), а в панели выбран 1 день | Сравнивать за одинаковый период |
 | Отчёт не приходит | Неправильное окно времени | Проверить `daily_summary_hour` и `window_minutes` |
-| Пользователь не разблокируется | `billing_reset_at` не сохранён | Убедиться, что `add_limited()` передаёт `billing_reset_at` |
+| Пользователь не разблокируется | `period_key`/`billing_reset_at` не сохранён | `add_limited()` пишет оба; фолбэк на `limited_at` в `should_unblock_user` |
 | Дубли уведомлений | `should_send_daily_summary` без окна | Использовать проверку `minute < window` |
 
 ---
@@ -323,8 +332,40 @@ sudo systemctl restart remna-quota.service
 | ✅ Верификация лимита (hysteresis) | Готово | Защита от ложных срабатываний |
 | ⏳ Подтверждение лимита через бота | В плане | Inline-кнопки: `[🔒 Залочить] [✅ Пропустить]` |
 | ⏳ Предупреждения 50%/90% | В плане | Уведомлять ДО достижения лимита |
-| ⏳ Отдельный скрипт отчётов | В плане | Вынести из основного цикла, гибкое расписание |
-| ⏳ Bedolaga Bot API интеграция | В плане | Отправка предупреждений через основной бот проекта |
+| ⏳ Bedolaga API как источник цикла | В плане | См. ниже |
+
+---
+
+## 🔌 Интеграция с Bedolaga (план)
+
+Bedolaga (бот продаж) — источник **настоящего** личного периода, которого нет в Remnawave.
+
+**Что нужно на стороне Bedolaga** (`.env` → рестарт контейнера):
+```
+WEB_API_ENABLED=true
+WEB_API_PORT=8080
+WEB_API_DEFAULT_TOKEN=<длинная случайная строка>   # это X-API-Key
+WEB_API_DOCS_ENABLED=true                          # Swagger на :8080/docs — свериться со схемой
+```
+
+**Что берём из Bedolaga** (`base_url` = `http://<bedolaga-host>:8080`):
+
+| Данные | Endpoint | Auth |
+|--------|----------|------|
+| Личный период, статус, тариф-лимит | `GET /subscriptions` → `start_date`, `end_date`, `traffic_limit_gb`, `status` | `X-API-Key` |
+| Трафик по нодам за период | `GET /cabinet/admin/traffic?start_date=&end_date=` → `node_traffic{uuid:bytes}` | Bearer |
+| Связка TG↔юзер | `GET /users/by-telegram-id` | `X-API-Key` |
+| Мгновенная реакция на продление | webhook `payment.completed` (HMAC-SHA256, `X-Webhook-Signature`) | секрет |
+
+**Модель**: цикл принадлежит Bedolaga. `billing.mode: "bedolaga"` → окно = `start_date + 30·k … +30`,
+лимит = `subscription.traffic_limit_gb`. Enforcement (смена external-сквада), hysteresis, dry-run,
+whitelist — без изменений. Маппинг Bedolaga↔Remnawave по `telegram_id` (поле `telegramId` у юзера
+Remnawave) либо по `short_uuid` из `subscription_url`.
+
+> ⚠️ У Bedolaga есть **свой** traffic-monitoring (`TRAFFIC_FAST_CHECK_*`, `TRAFFIC_DAILY_*`) —
+> notification-only, скользящее окно 24ч, без смены сквадов. Когда этот проект возьмёт enforcement,
+> его стоит выключить (`TRAFFIC_FAST_CHECK_ENABLED=false`, `TRAFFIC_DAILY_CHECK_ENABLED=false`),
+> иначе будут двойные уведомления.
 
 ---
 
