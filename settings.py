@@ -29,7 +29,8 @@ def load_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
             "base_url": "",
             "token": "",
             "timeout": 15,
-            "username_template": "user_{telegram_id}"
+            "username_template": "user_{telegram_id}",
+            "fallback_unlinked": True
         },
         "traffic_cost": {"currency": "₽", "price_per_gb": 0}
         ,"nodes": {"auto_discover": False, "include_disabled": False, "policies": {}}

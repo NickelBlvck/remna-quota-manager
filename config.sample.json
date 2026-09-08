@@ -53,6 +53,7 @@
     "base_url": "http://127.0.0.1:8080",
     "token": "PUT_BEDOLAGA_WEB_API_DEFAULT_TOKEN_HERE",
     "timeout": 15,
-    "username_template": "user_{telegram_id}"
+    "username_template": "user_{telegram_id}",
+    "fallback_unlinked": true
   }
 }

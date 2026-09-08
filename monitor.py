@@ -89,15 +89,6 @@ class TrafficMonitor:
                 top_limit=int(self.config.get("bandwidth_page_size", 5000)),
             )
 
-            def _resolve(uo):
-                """(augmented_user, effective_limit_gb) с учётом bedolaga."""
-                u_lim = limit_gb
-                if billing.is_bedolaga_mode(self.config):
-                    uo, bctx = self._bedolaga_ctx(uo)
-                    if bctx and bctx["limit_gb"] > 0:
-                        u_lim = bctx["limit_gb"]
-                return uo, self.effective_limit_gb(u_lim), u_lim
-
             # top-user статистика → реальные юзеры; оставляем только «около лимита»
             # и тех, кто уже отслеживается
             cand: dict = {}  # lower_uuid -> (user_obj, approx_gb | None, eff, limit_gb)
@@ -111,7 +102,10 @@ class TrafficMonitor:
                 approx = int(u_stat.get("total", 0)) / (1024 ** 3)
                 lu = uo["uuid"].lower()
                 tracked = (lu, node_uuid) in pending or (lu, node_uuid) in limited
-                uo, u_eff, u_lim = _resolve(uo)
+                uo, u_lim, ok = self._user_quota(uo, limit_gb)
+                if not ok and not tracked:
+                    continue
+                u_eff = self.effective_limit_gb(u_lim)
                 if approx >= u_eff or tracked:
                     cand[lu] = (uo, approx, u_eff, u_lim)
 
@@ -120,8 +114,8 @@ class TrafficMonitor:
                 if n_uuid != node_uuid or u_uuid.lower() in cand:
                     continue
                 uo = self._uuid_map.get(u_uuid) or self.api.get_user(u_uuid) or {"uuid": u_uuid}
-                uo, u_eff, u_lim = _resolve(uo)
-                cand[(uo.get("uuid") or u_uuid).lower()] = (uo, None, u_eff, u_lim)
+                uo, u_lim, _ok = self._user_quota(uo, limit_gb)
+                cand[(uo.get("uuid") or u_uuid).lower()] = (uo, None, self.effective_limit_gb(u_lim), u_lim)
 
             if not cand:
                 continue
@@ -256,6 +250,22 @@ class TrafficMonitor:
         if ctx.get("start_date"):
             aug["subscription_start_date"] = ctx["start_date"]
         return aug, ctx
+
+    def _user_quota(self, user_obj: dict, node_limit_gb: float):
+        """(augmented_user, limit_gb, monitor?) с учётом billing.mode.
+
+        bedolaga: связанный юзер → лимит тарифа; не связанный → понодовый
+        limit_gb, если ``bedolaga.fallback_unlinked`` (по умолчанию true).
+        """
+        if not billing.is_bedolaga_mode(self.config):
+            return user_obj, node_limit_gb, node_limit_gb > 0
+        aug, ctx = self._bedolaga_ctx(user_obj)
+        if ctx is not None:
+            lim = ctx["limit_gb"] if ctx["limit_gb"] > 0 else node_limit_gb
+            return aug, lim, lim > 0
+        if (self.config.get("bedolaga") or {}).get("fallback_unlinked", True):
+            return user_obj, node_limit_gb, node_limit_gb > 0
+        return user_obj, node_limit_gb, False
 
     def _get_monitored_nodes(self):
         """Discover nodes from the panel and merge local quota policies."""
@@ -467,16 +477,10 @@ class TrafficMonitor:
             if self.db.is_whitelisted(user_uuid):
                 continue
 
-            # bedolaga mode: цикл и лимит — из подписки Bedolaga
-            user_limit_gb = limit_gb
-            if billing.is_bedolaga_mode(self.config):
-                user_obj, bctx = self._bedolaga_ctx(user_obj)
-                if bctx is None:
-                    continue  # нет активной подписки Bedolaga — не наш клиент
-                if bctx["limit_gb"] > 0:
-                    user_limit_gb = bctx["limit_gb"]
-                elif user_limit_gb <= 0:
-                    continue  # ни тарифного, ни нодового лимита
+            # цикл и лимит: bedolaga → из подписки; иначе → понодовый limit_gb
+            user_obj, user_limit_gb, monitor_ok = self._user_quota(user_obj, limit_gb)
+            if not monitor_ok:
+                continue
             user_eff = self.effective_limit_gb(user_limit_gb)
 
             period_key = billing.user_period_key(user_obj, self.config)

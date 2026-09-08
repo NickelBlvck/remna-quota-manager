@@ -185,6 +185,51 @@ class BedolagaTests(unittest.TestCase):
         self.assertEqual(row["limit_gb"], 10.0)        # tariff limit, not node's 999
         self.assertEqual(row["verdict"], "over")       # 12 GB >= 10 GB tariff
 
+    def test_unlinked_user_falls_back_to_node_limit(self):
+        from monitor import TrafficMonitor
+        GB = 1024 ** 3
+
+        class FakeRemna:
+            def get_users(self, limit=5000):
+                return [{"uuid": "ru-x", "username": "legacy_guy",
+                         "createdAt": "2026-08-20T00:00:00Z"}]
+
+            def get_nodes(self):
+                return []
+
+            def get_user(self, uuid):
+                return None
+
+            def get_node_bandwidth(self, node_uuid, start, end, top_limit=100):
+                return [{"username": "legacy_guy", "uuid": "ru-x", "total": 60 * GB}]
+
+        class EmptyBedolaga:
+            def iter_users(self):
+                return iter([])
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        db = QuotaDatabase(path)
+        base = {
+            "billing": {"mode": "bedolaga", "subscription_cycle_days": 30},
+            "bedolaga": {"base_url": "http://x", "token": "t"},
+            "monitored_nodes": [{"uuid": "n1", "name": "n1", "limit_gb": 50,
+                                 "limited_external_squad_uuid": "lim"}],
+            "dry_run": True,
+        }
+        m = TrafficMonitor(FakeRemna(), db, dict(base))
+        m.bedolaga = EmptyBedolaga()
+        row = next((r for r in m.evaluate()["rows"] if r["username"] == "legacy_guy"), None)
+        self.assertIsNotNone(row)                       # fallback on by default
+        self.assertEqual(row["limit_gb"], 50.0)         # node limit
+
+        cfg2 = dict(base)
+        cfg2["bedolaga"] = {**base["bedolaga"], "fallback_unlinked": False}
+        m2 = TrafficMonitor(FakeRemna(), db, cfg2)
+        m2.bedolaga = EmptyBedolaga()
+        self.assertFalse(any(r["username"] == "legacy_guy" for r in m2.evaluate()["rows"]))
+
 
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:

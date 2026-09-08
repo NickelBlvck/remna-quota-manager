@@ -370,6 +370,7 @@ TRAFFIC_DAILY_CHECK_ENABLED=false
 2. **Маппинг Bedolaga↔Remnawave**: `short_uuid` из `subscription_url` → юзер панели по `shortUuid`; фолбэк — `telegramId`, затем `username == user_<telegram_id>`. Лог: `Bedolaga: N users fetched, M subs linked to panel`.
 3. Для связанных юзеров: **лимит = `traffic_limit_gb` тарифа**, **окно цикла = катящийся anchor от `start_date`** (`billing.cycle_anchor`). Юзеры без активной подписки Bedolaga в этом режиме пропускаются.
 4. Enforcement (смена external-сквада), hysteresis, dry-run, whitelist, `🎯 Проверка циклов` — без изменений, просто с правильными окном и лимитом.
+5. **Юзеры без подписки Bedolaga**: `bedolaga.fallback_unlinked` (по умолчанию `true`) — мониторятся по понодовому `limit_gb` и циклу от `lastTrafficResetAt`/`createdAt`. `false` — игнорируются.
 
 > `traffic_limit_gb` из Bedolaga трактуется как лимит **на `subscription_cycle_days`** (обычно 30 дн.).
 > Если тариф продаёт трафик на весь срок подписки — держи `mode: "subscription"` и понодовый `limit_gb`.
