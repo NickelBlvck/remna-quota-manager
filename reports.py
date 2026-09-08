@@ -91,3 +91,65 @@ def generate_traffic_report(
 
 def generate_daily_summary(api, config):
     return generate_traffic_report(api, config, days=1, title="Daily Report", top_n=5)
+
+
+def _verdict_tag(row) -> str:
+    need = row["need"]
+    v = row["verdict"]
+    if v == "limited":
+        return "LIMITED"
+    if v == "whitelist":
+        return "WL"
+    if v == "over":
+        c = row["checks"]
+        return f"{c}/{need}" + (" !" if c + 1 >= need else "")
+    return "ok"
+
+
+def format_evaluation(result, *, max_chars=3800) -> str:
+    """Render monitor.evaluate() — who the enforcement logic thinks is over.
+
+    Per-user traffic is for that user's own billing cycle (cycle_start →
+    cycle_end), compared to the node limit. "!" = will be limited on the next
+    monitor pass, "N/M" = verification progress, "WL" = whitelisted (safe),
+    "LIMITED" = already restricted.
+    """
+    rows = result.get("rows", [])
+    dry = result.get("dry_run", True)
+    mode = "🧪 DRY-RUN — реальных блокировок нет" if dry else "⚡ БОЕВОЙ режим"
+
+    if not rows:
+        return f"✅ Никто не превышает лимит по своему циклу.\n<i>{mode}</i>"
+
+    out = f"🎯 <b>Проверка циклов</b>\n<i>{mode}</i>\n"
+    by_node: dict = {}
+    for r in rows:
+        by_node.setdefault(r["node_name"], []).append(r)
+
+    truncated = False
+    for node_name, nrows in by_node.items():
+        limit_gb = nrows[0]["limit_gb"]
+        tbl = [f"{'user':<16} {'цикл GB':>9} {'%':>4}  статус",
+               "-" * 42]
+        for r in nrows[:25]:
+            t = r["traffic_gb"]
+            tg = f"{t:.2f}" if t is not None else "—"
+            pct = f"{t / float(limit_gb) * 100:.0f}" if (t is not None and limit_gb) else "-"
+            tbl.append(f"{(r['username'] or '?')[:16]:<16} {tg:>9} {pct:>4}  {_verdict_tag(r)}")
+        chunk = (
+            f"\n🌐 <b>{esc(node_name)}</b> · лимит {esc(limit_gb)} GB\n"
+            f"<pre>{esc(chr(10).join(tbl))}</pre>\n"
+        )
+        if len(out) + len(chunk) > max_chars:
+            truncated = True
+            break
+        out += chunk
+
+    if truncated:
+        out += "\n<i>…список обрезан</i>"
+    out += (
+        "\n<i>! — залочит в ближайшую проверку · N/M — подтверждений подряд · "
+        "WL — whitelist · LIMITED — уже ограничен. Цикл у каждого свой "
+        "(от lastTrafficResetAt).</i>"
+    )
+    return out

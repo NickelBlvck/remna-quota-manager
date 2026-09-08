@@ -55,8 +55,11 @@ def main():
             logger.warning("⚠️ DRY-RUN MODE ENABLED: No actions will be performed on squads.")
 
         # 6. Инициализация компонентов
-        bot = QuotaBot(config.get("telegram", {}).get("bot_token"), api_client=api, db=db, config=config)
         monitor = TrafficMonitor(api, db, config)
+        bot = QuotaBot(
+            config.get("telegram", {}).get("bot_token"),
+            api_client=api, db=db, config=config, monitor=monitor,
+        )
         
         # 7. Запуск монитора в отдельном потоке
         monitor_thread = threading.Thread(target=monitor.run_loop, daemon=True, name="MonitorLoop")

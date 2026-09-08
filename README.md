@@ -255,6 +255,7 @@ cd /opt/remna-quota-manager   # рядом должна быть data/quota.db �
 
 .venv/bin/python db_tool.py list          # показать ограниченных
 .venv/bin/python db_tool.py stats         # статистика
+.venv/bin/python db_tool.py check         # кто превышает лимит по своему циклу (read-only прогон enforcement)
 .venv/bin/python db_tool.py unblock <uuid># разблокировать вручную
 .venv/bin/python db_tool.py audit 20      # последние действия
 .venv/bin/python db_tool.py export        # экспорт в JSON
@@ -265,6 +266,7 @@ cd /opt/remna-quota-manager   # рядом должна быть data/quota.db �
 /start            — главное меню (только для telegram.admin_user_ids)
 📊 Статус         — dry-run флаг, кол-во limited/pending
 📈 Отчёт          — трафик по нодам за последние N дн. + топ-10 юзеров (моноширинная таблица, `!` = на лимите/выше)
+🎯 Проверка циклов — кто превышает лимит ПО СВОЕМУ циклу (то, что реально решает монитор): verdict over/`N/M`/WL/LIMITED
 👥 Ограниченные   — список + кнопки разблокировки
 🔓 Разблокировать — тот же список ограниченных
 🛡 Whitelist      — просмотр + добавление UUID-исключений

@@ -41,6 +41,107 @@ class TrafficMonitor:
         """Сколько раз подряд нужно превысить лимит (hysteresis)"""
         return max(1, int(self.config.get("limit_hysteresis_checks", 2)))
 
+    def evaluate(self) -> dict:
+        """Read-only повтор enforcement-решения по текущему состоянию.
+
+        Возвращает ``{"rows": [...], "dry_run": bool, "need": int}``. Каждая
+        строка: node_name, username, uuid, traffic_gb (за личный цикл), limit_gb,
+        checks, need, verdict ∈ {limited, over, whitelist, ok}, cycle_start,
+        cycle_end. В выдаче — только те, кто на лимите/выше по своему циклу, плюс
+        уже ограниченные и те, кто на верификации. Ничего не меняет.
+        """
+        self._build_user_map()
+        nodes = self._get_monitored_nodes()
+        need = self.required_checks()
+        sub = billing.is_subscription_mode(self.config)
+        pending = {(p["uuid"], p["node_uuid"]): p["checks_count"] for p in self.db.list_pending()}
+        limited = {(r["uuid"], r["node_uuid"]) for r in self.db.list_enforced_limited()}
+
+        rows = []
+        for node_cfg in nodes:
+            node_uuid = node_cfg["uuid"]
+            try:
+                limit_gb = float(node_cfg["limit_gb"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if limit_gb <= 0:
+                continue
+            node_name = node_cfg.get("name", node_uuid[:8])
+            eff = self.effective_limit_gb(limit_gb)
+            scan_start, scan_end = billing.scan_window_dates(self.config)
+            top = self.api.get_node_bandwidth(
+                node_uuid, scan_start, scan_end,
+                top_limit=int(self.config.get("bandwidth_page_size", 5000)),
+            )
+
+            # top-user статистика → реальные юзеры; оставляем только «около лимита»
+            # и тех, кто уже отслеживается
+            cand: dict = {}  # lower_uuid -> (user_obj, approx_gb | None)
+            for u_stat in top:
+                uo = (
+                    self._uuid_map.get((u_stat.get("uuid") or "").lower())
+                    or self._user_map.get(u_stat.get("username"))
+                )
+                if not uo or not uo.get("uuid"):
+                    continue
+                approx = int(u_stat.get("total", 0)) / (1024 ** 3)
+                lu = uo["uuid"].lower()
+                if approx >= eff or (lu, node_uuid) in pending or (lu, node_uuid) in limited:
+                    cand[lu] = (uo, approx)
+
+            # отслеживаемые юзеры, выпавшие из топа ноды
+            for (u_uuid, n_uuid) in (limited | set(pending)):
+                if n_uuid != node_uuid or u_uuid.lower() in cand:
+                    continue
+                uo = self._uuid_map.get(u_uuid) or self.api.get_user(u_uuid) or {"uuid": u_uuid}
+                cand[(uo.get("uuid") or u_uuid).lower()] = (uo, None)
+
+            if not cand:
+                continue
+
+            # точный трафик за цикл, сгруппировано по окну — экономим запросы
+            precise: dict = {}
+            groups: dict = {}
+            for uo, _ in cand.values():
+                groups.setdefault(billing.user_period_dates(uo, self.config), []).append(uo)
+            for (w_start, w_end), users in groups.items():
+                bw = self.api.get_node_bandwidth(node_uuid, w_start, w_end, top_limit=500)
+                by_uuid = {(b.get("uuid") or "").lower(): b.get("total", 0) for b in bw}
+                by_name = {b.get("username"): b.get("total", 0) for b in bw}
+                for uo in users:
+                    v = by_uuid.get((uo.get("uuid") or "").lower())
+                    if v is None:
+                        v = by_name.get(uo.get("username"))
+                    if v is not None:
+                        precise[(uo.get("uuid") or "").lower()] = int(v) / (1024 ** 3)
+
+            for lu, (uo, approx) in cand.items():
+                traffic = precise.get(lu, approx)
+                over = (traffic or 0) >= eff
+                if (lu, node_uuid) in limited:
+                    verdict = "limited"
+                elif self.db.is_whitelisted(lu):
+                    verdict = "whitelist" if over else "ok"
+                else:
+                    verdict = "over" if over else "ok"
+                cyc = billing.user_period_dates(uo, self.config)
+                rows.append({
+                    "node_name": node_name,
+                    "username": uo.get("username") or lu[:8],
+                    "uuid": uo.get("uuid") or lu,
+                    "traffic_gb": traffic,
+                    "limit_gb": limit_gb,
+                    "checks": pending.get((lu, node_uuid), 0),
+                    "need": need,
+                    "verdict": verdict,
+                    "cycle_start": cyc[0],
+                    "cycle_end": cyc[1],
+                    "mode": "subscription" if sub else "calendar",
+                })
+
+        rows.sort(key=lambda r: (r["node_name"], -(r["traffic_gb"] or 0)))
+        return {"rows": rows, "dry_run": self.is_dry_run(), "need": need}
+
     def _build_user_map(self):
         """Кэширует пользователей для быстрого поиска по username/uuid"""
         users = self.api.get_users(limit=int(self.config.get("users_page_size", 5000)))

@@ -11,12 +11,33 @@ def main():
     db = QuotaDatabase()
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("list", "stats", "unblock", "audit", "export"))
+    parser.add_argument("command", choices=("list", "stats", "unblock", "audit", "export", "check"))
     parser.add_argument("uuid", nargs="?")
     args = parser.parse_args()
 
     cmd = args.command
-    
+
+    if cmd == "check":
+        from monitor import TrafficMonitor
+        config = load_config()
+        api = RemnawaveAPI(config["panel"]["base_url"], config["panel"]["token"])
+        result = TrafficMonitor(api, db, config).evaluate()
+        mode = "DRY-RUN" if result["dry_run"] else "БОЕВОЙ"
+        rows = result["rows"]
+        print(f"# режим: {mode} · hysteresis: {result['need']} · строк: {len(rows)}")
+        print(f"{'node':<16} {'user':<22} {'cycle GB':>9} {'%':>5} {'cycle end':<12} verdict")
+        print("-" * 90)
+        for r in rows:
+            t = r["traffic_gb"]
+            tg = f"{t:.2f}" if t is not None else "-"
+            pct = f"{t / float(r['limit_gb']) * 100:.0f}" if (t is not None and r["limit_gb"]) else "-"
+            tag = r["verdict"]
+            if r["verdict"] == "over":
+                tag = f"over {r['checks']}/{r['need']}" + ("  <= NEXT PASS" if r["checks"] + 1 >= r["need"] else "")
+            print(f"{r['node_name'][:16]:<16} {str(r['username'])[:22]:<22} {tg:>9} {pct:>5} "
+                  f"{str(r.get('cycle_end') or '')[:12]:<12} {tag}")
+        return
+
     if cmd == "list":
         users = db.list_limited()
         print(f"{'UUID':<36} | {'Username':<20} | {'Node':<15}")

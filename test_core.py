@@ -54,6 +54,57 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(db.list_limited(), [])
 
 
+class EvaluateTests(unittest.TestCase):
+    class _FakeAPI:
+        GB = 1024 ** 3
+
+        def __init__(self):
+            self._users = [
+                {"uuid": "a-uuid", "username": "alice", "lastTrafficResetAt": "2026-09-01T00:00:00Z"},
+                {"uuid": "b-uuid", "username": "bob", "lastTrafficResetAt": "2026-09-01T00:00:00Z"},
+                {"uuid": "c-uuid", "username": "carol", "lastTrafficResetAt": "2026-09-01T00:00:00Z"},
+            ]
+
+        def get_users(self, limit=5000):
+            return self._users
+
+        def get_nodes(self):
+            return []
+
+        def get_user(self, uuid):
+            return next((u for u in self._users if u["uuid"] == uuid), None)
+
+        def get_node_bandwidth(self, node_uuid, start, end, top_limit=100):
+            return [
+                {"username": "alice", "uuid": "a-uuid", "total": 12 * self.GB},
+                {"username": "carol", "uuid": "c-uuid", "total": 11 * self.GB},
+                {"username": "bob", "uuid": "b-uuid", "total": 5 * self.GB},
+            ]
+
+    def _monitor(self):
+        from monitor import TrafficMonitor
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        db = QuotaDatabase(path)
+        db.add_whitelist("c-uuid")
+        cfg = {
+            "billing": {"mode": "subscription", "subscription_cycle_days": 30},
+            "monitored_nodes": [{"uuid": "n1", "name": "node-1", "limit_gb": 10,
+                                 "limited_external_squad_uuid": "lim-1"}],
+            "dry_run": True,
+        }
+        return TrafficMonitor(self._FakeAPI(), db, cfg)
+
+    def test_evaluate_classifies_over_and_whitelist_and_skips_ok(self):
+        result = self._monitor().evaluate()
+        verdicts = {r["username"]: r["verdict"] for r in result["rows"]}
+        self.assertEqual(verdicts.get("alice"), "over")
+        self.assertEqual(verdicts.get("carol"), "whitelist")
+        self.assertNotIn("bob", verdicts)   # under limit → not reported
+        self.assertTrue(result["dry_run"])
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):

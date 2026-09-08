@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from nodes import resolve_monitored_nodes
 from notify import esc
-from reports import generate_traffic_report
+from reports import format_evaluation, generate_traffic_report
 
 logger = logging.getLogger("bot")
 
@@ -15,10 +15,11 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 
 class QuotaBot:
-    def __init__(self, token: str, api_client=None, db=None, config=None):
+    def __init__(self, token: str, api_client=None, db=None, config=None, monitor=None):
         self.token = token
         self.api = api_client
         self.db = db
+        self.monitor = monitor
         self.config = config or {}
         self.admin_ids = self._load_admin_ids(self.config)
         self.app = Application.builder().token(token).build()
@@ -51,6 +52,7 @@ class QuotaBot:
         keyboard = [
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
             [InlineKeyboardButton("📈 Отчёт", callback_data="report")],
+            [InlineKeyboardButton("🎯 Проверка циклов", callback_data="check")],
             [InlineKeyboardButton("👥 Ограниченные", callback_data="list_limited")],
             [InlineKeyboardButton("🔓 Разблокировать", callback_data="unblock_manual")],
             [InlineKeyboardButton("🛡 Whitelist", callback_data="whitelist_menu")],
@@ -77,6 +79,8 @@ class QuotaBot:
                 await self._show_status(query)
             elif data == "report":
                 await self._show_report(query)
+            elif data == "check":
+                await self._show_check(query)
             elif data in ("list_limited", "unblock_manual"):
                 await self._list_limited(query)
             elif data.startswith("confirm_unblock:"):
@@ -134,6 +138,20 @@ class QuotaBot:
             logger.error("report failed: %s", e, exc_info=True)
             text = f"❌ Не удалось собрать отчёт: {esc(str(e)[:200])}"
 
+        kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+
+    async def _show_check(self, query):
+        if not self.monitor:
+            await query.edit_message_text("❌ monitor недоступен в этой сборке")
+            return
+        await query.edit_message_text("⏳ Считаю трафик за личные циклы (несколько запросов к панели)…")
+        try:
+            result = await asyncio.to_thread(self.monitor.evaluate)
+            text = format_evaluation(result)
+        except Exception as e:
+            logger.error("cycle check failed: %s", e, exc_info=True)
+            text = f"❌ Не удалось: {esc(str(e)[:200])}"
         kb = [[InlineKeyboardButton("↩️ Назад", callback_data="back")]]
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
