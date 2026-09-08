@@ -12,10 +12,18 @@ def _parse_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def billing_mode(config: Dict[str, Any]) -> str:
+    return (config.get("billing") or {}).get("mode", "subscription")
+
+
+def is_bedolaga_mode(config: Dict[str, Any]) -> bool:
+    return billing_mode(config) == "bedolaga"
+
+
 def is_subscription_mode(config: Dict[str, Any]) -> bool:
-    """Проверяет режим биллинга"""
-    billing = config.get("billing") or {}
-    return billing.get("mode", "subscription") == "subscription"
+    """subscription и bedolaga считают цикл одинаково (катящийся anchor);
+    отличается только источник опорной даты и лимита."""
+    return billing_mode(config) in ("subscription", "bedolaga")
 
 
 def _cycle_days(config: Dict[str, Any]) -> int:

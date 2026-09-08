@@ -25,6 +25,7 @@
 ├── database.py             # SQLite: limited_users, pending_limits, audit_log, settings
 ├── remnawave.py            # API-клиент: только рабочие bulk-эндпоинты, external squads only
 ├── nodes.py                # Резолв monitored_nodes: auto-discover + merge policies (общий для monitor/bot/db_tool)
+├── bedolaga.py             # Клиент Web API Bedolaga (billing.mode: bedolaga) — цикл и лимит из подписок
 ├── monitor.py              # Ядро: проверка лимитов, верификация, разблокировка
 ├── bot.py                  # Telegram: команды, inline-кнопки, ручная разблокировка
 ├── notify.py               # Уведомления: тайминг отчётов, fallback на приват при ошибке топика
@@ -332,40 +333,46 @@ sudo systemctl restart remna-quota.service
 | ✅ Верификация лимита (hysteresis) | Готово | Защита от ложных срабатываний |
 | ⏳ Подтверждение лимита через бота | В плане | Inline-кнопки: `[🔒 Залочить] [✅ Пропустить]` |
 | ⏳ Предупреждения 50%/90% | В плане | Уведомлять ДО достижения лимита |
-| ⏳ Bedolaga API как источник цикла | В плане | См. ниже |
+| ✅ Bedolaga API как источник цикла | Готово (opt-in) | `billing.mode: "bedolaga"`, см. ниже |
+| ⏳ Bedolaga webhook `payment.completed` | В плане | Мгновенная реакция на продление вместо ожидания цикла |
 
 ---
 
-## 🔌 Интеграция с Bedolaga (план)
+## 🔌 Интеграция с Bedolaga (`billing.mode: "bedolaga"`)
 
-Bedolaga (бот продаж) — источник **настоящего** личного периода, которого нет в Remnawave.
+Bedolaga (бот продаж) — источник **настоящего** личного периода, которого нет в Remnawave
+(там сброс только `MONTHLY`/`WEEKLY`/`DAILY`/`NO_RESET`).
 
-**Что нужно на стороне Bedolaga** (`.env` → рестарт контейнера):
+### На стороне Bedolaga (`.env` → рестарт контейнера)
 ```
 WEB_API_ENABLED=true
 WEB_API_PORT=8080
 WEB_API_DEFAULT_TOKEN=<длинная случайная строка>   # это X-API-Key
-WEB_API_DOCS_ENABLED=true                          # Swagger на :8080/docs — свериться со схемой
+# двойной мониторинг не нужен — выключаем встроенный:
+TRAFFIC_FAST_CHECK_ENABLED=false
+TRAFFIC_DAILY_CHECK_ENABLED=false
 ```
 
-**Что берём из Bedolaga** (`base_url` = `http://<bedolaga-host>:8080`):
+### В `config.json` quota-manager
+```json
+{
+  "billing": { "mode": "bedolaga", "subscription_cycle_days": 30 },
+  "bedolaga": {
+    "base_url": "http://127.0.0.1:8080",
+    "token": "<WEB_API_DEFAULT_TOKEN>",
+    "username_template": "user_{telegram_id}"
+  }
+}
+```
 
-| Данные | Endpoint | Auth |
-|--------|----------|------|
-| Личный период, статус, тариф-лимит | `GET /subscriptions` → `start_date`, `end_date`, `traffic_limit_gb`, `status` | `X-API-Key` |
-| Трафик по нодам за период | `GET /cabinet/admin/traffic?start_date=&end_date=` → `node_traffic{uuid:bytes}` | Bearer |
-| Связка TG↔юзер | `GET /users/by-telegram-id` | `X-API-Key` |
-| Мгновенная реакция на продление | webhook `payment.completed` (HMAC-SHA256, `X-Webhook-Signature`) | секрет |
+### Что делает
+1. `bedolaga.iter_users()` → `GET /users` (пагинация, `X-API-Key`): у каждого `telegram_id` + вложенная `subscription` (`start_date`, `traffic_limit_gb`, `status`, `subscription_url`, `connected_squads`).
+2. **Маппинг Bedolaga↔Remnawave**: `short_uuid` из `subscription_url` → юзер панели по `shortUuid`; фолбэк — `telegramId`, затем `username == user_<telegram_id>`. Лог: `Bedolaga: N users fetched, M subs linked to panel`.
+3. Для связанных юзеров: **лимит = `traffic_limit_gb` тарифа**, **окно цикла = катящийся anchor от `start_date`** (`billing.cycle_anchor`). Юзеры без активной подписки Bedolaga в этом режиме пропускаются.
+4. Enforcement (смена external-сквада), hysteresis, dry-run, whitelist, `🎯 Проверка циклов` — без изменений, просто с правильными окном и лимитом.
 
-**Модель**: цикл принадлежит Bedolaga. `billing.mode: "bedolaga"` → окно = `start_date + 30·k … +30`,
-лимит = `subscription.traffic_limit_gb`. Enforcement (смена external-сквада), hysteresis, dry-run,
-whitelist — без изменений. Маппинг Bedolaga↔Remnawave по `telegram_id` (поле `telegramId` у юзера
-Remnawave) либо по `short_uuid` из `subscription_url`.
-
-> ⚠️ У Bedolaga есть **свой** traffic-monitoring (`TRAFFIC_FAST_CHECK_*`, `TRAFFIC_DAILY_*`) —
-> notification-only, скользящее окно 24ч, без смены сквадов. Когда этот проект возьмёт enforcement,
-> его стоит выключить (`TRAFFIC_FAST_CHECK_ENABLED=false`, `TRAFFIC_DAILY_CHECK_ENABLED=false`),
-> иначе будут двойные уведомления.
+> `traffic_limit_gb` из Bedolaga трактуется как лимит **на `subscription_cycle_days`** (обычно 30 дн.).
+> Если тариф продаёт трафик на весь срок подписки — держи `mode: "subscription"` и понодовый `limit_gb`.
 
 ---
 

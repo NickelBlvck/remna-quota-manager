@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 import billing
+from bedolaga import BedolagaAPI, short_uuid_from_sub_url
 from database import QuotaDatabase
 from nodes import resolve_monitored_nodes
 from notify import TelegramNotifier, esc
@@ -21,10 +22,24 @@ class TrafficMonitor:
         self.notifier = TelegramNotifier(self.config)
         self._user_map: Dict[str, dict] = {}
         self._uuid_map: Dict[str, dict] = {}
+        self._short_map: Dict[str, dict] = {}
+        self._tgid_map: Dict[int, dict] = {}
+        self._bedolaga_index: Dict[str, dict] = {}  # panel uuid (lower) -> sub ctx
+        self.bedolaga = self._make_bedolaga()
+
+    def _make_bedolaga(self) -> Optional[BedolagaAPI]:
+        bcfg = self.config.get("bedolaga") or {}
+        if not billing.is_bedolaga_mode(self.config):
+            return None
+        if not bcfg.get("base_url") or not bcfg.get("token"):
+            logger.error("billing.mode=bedolaga but bedolaga.base_url/token missing")
+            return None
+        return BedolagaAPI(bcfg["base_url"], bcfg["token"], timeout=int(bcfg.get("timeout", 15)))
 
     def reload_config(self):
         self.config = load_config()
         self.notifier.reload(self.config)
+        self.bedolaga = self._make_bedolaga()
 
     def is_dry_run(self) -> bool:
         """Проверяет, включен ли режим сухого запуска"""
@@ -74,9 +89,18 @@ class TrafficMonitor:
                 top_limit=int(self.config.get("bandwidth_page_size", 5000)),
             )
 
+            def _resolve(uo):
+                """(augmented_user, effective_limit_gb) с учётом bedolaga."""
+                u_lim = limit_gb
+                if billing.is_bedolaga_mode(self.config):
+                    uo, bctx = self._bedolaga_ctx(uo)
+                    if bctx and bctx["limit_gb"] > 0:
+                        u_lim = bctx["limit_gb"]
+                return uo, self.effective_limit_gb(u_lim), u_lim
+
             # top-user статистика → реальные юзеры; оставляем только «около лимита»
             # и тех, кто уже отслеживается
-            cand: dict = {}  # lower_uuid -> (user_obj, approx_gb | None)
+            cand: dict = {}  # lower_uuid -> (user_obj, approx_gb | None, eff, limit_gb)
             for u_stat in top:
                 uo = (
                     self._uuid_map.get((u_stat.get("uuid") or "").lower())
@@ -86,15 +110,18 @@ class TrafficMonitor:
                     continue
                 approx = int(u_stat.get("total", 0)) / (1024 ** 3)
                 lu = uo["uuid"].lower()
-                if approx >= eff or (lu, node_uuid) in pending or (lu, node_uuid) in limited:
-                    cand[lu] = (uo, approx)
+                tracked = (lu, node_uuid) in pending or (lu, node_uuid) in limited
+                uo, u_eff, u_lim = _resolve(uo)
+                if approx >= u_eff or tracked:
+                    cand[lu] = (uo, approx, u_eff, u_lim)
 
             # отслеживаемые юзеры, выпавшие из топа ноды
             for (u_uuid, n_uuid) in (limited | set(pending)):
                 if n_uuid != node_uuid or u_uuid.lower() in cand:
                     continue
                 uo = self._uuid_map.get(u_uuid) or self.api.get_user(u_uuid) or {"uuid": u_uuid}
-                cand[(uo.get("uuid") or u_uuid).lower()] = (uo, None)
+                uo, u_eff, u_lim = _resolve(uo)
+                cand[(uo.get("uuid") or u_uuid).lower()] = (uo, None, u_eff, u_lim)
 
             if not cand:
                 continue
@@ -102,7 +129,7 @@ class TrafficMonitor:
             # точный трафик за цикл, сгруппировано по окну — экономим запросы
             precise: dict = {}
             groups: dict = {}
-            for uo, _ in cand.values():
+            for uo, _a, _e, _l in cand.values():
                 groups.setdefault(billing.user_period_dates(uo, self.config), []).append(uo)
             for (w_start, w_end), users in groups.items():
                 bw = self.api.get_node_bandwidth(node_uuid, w_start, w_end, top_limit=500)
@@ -115,9 +142,9 @@ class TrafficMonitor:
                     if v is not None:
                         precise[(uo.get("uuid") or "").lower()] = int(v) / (1024 ** 3)
 
-            for lu, (uo, approx) in cand.items():
+            for lu, (uo, approx, u_eff, u_lim) in cand.items():
                 traffic = precise.get(lu, approx)
-                over = (traffic or 0) >= eff
+                over = (traffic or 0) >= u_eff
                 if (lu, node_uuid) in limited:
                     verdict = "limited"
                 elif self.db.is_whitelisted(lu):
@@ -130,7 +157,7 @@ class TrafficMonitor:
                     "username": uo.get("username") or lu[:8],
                     "uuid": uo.get("uuid") or lu,
                     "traffic_gb": traffic,
-                    "limit_gb": limit_gb,
+                    "limit_gb": u_lim,
                     "checks": pending.get((lu, node_uuid), 0),
                     "need": need,
                     "verdict": verdict,
@@ -143,16 +170,92 @@ class TrafficMonitor:
         return {"rows": rows, "dry_run": self.is_dry_run(), "need": need}
 
     def _build_user_map(self):
-        """Кэширует пользователей для быстрого поиска по username/uuid"""
+        """Кэширует пользователей для быстрого поиска по username/uuid/shortUuid/telegramId"""
         users = self.api.get_users(limit=int(self.config.get("users_page_size", 5000)))
         self._user_map = {}
         self._uuid_map = {}
+        self._short_map = {}
+        self._tgid_map = {}
         for u in users:
             if u.get("username"):
                 self._user_map[u["username"]] = u
             if u.get("uuid"):
                 self._uuid_map[u["uuid"]] = u
+            su = u.get("shortUuid") or u.get("subscriptionUuid")
+            if su:
+                self._short_map[su] = u
+            tg = u.get("telegramId")
+            if tg not in (None, ""):
+                try:
+                    self._tgid_map[int(tg)] = u
+                except (TypeError, ValueError):
+                    pass
         logger.info("Cached %s users", len(self._user_map))
+        self._load_bedolaga_index()
+
+    def _load_bedolaga_index(self):
+        """bedolaga mode: подтянуть подписки и связать с юзерами панели."""
+        self._bedolaga_index = {}
+        if not self.bedolaga:
+            return
+        bcfg = self.config.get("bedolaga") or {}
+        tmpl = bcfg.get("username_template", "user_{telegram_id}")
+        dead = {s.lower() for s in (bcfg.get("inactive_statuses") or ["expired", "disabled"])}
+
+        try:
+            rows = list(self.bedolaga.iter_users())
+        except Exception as e:
+            logger.error("Bedolaga fetch failed: %s", e)
+            return
+
+        matched = 0
+        for bu in rows:
+            sub = bu.get("subscription") or {}
+            if not sub:
+                continue
+            status = (sub.get("actual_status") or sub.get("status") or "").lower()
+            if status in dead:
+                continue
+
+            ruser = None
+            su = short_uuid_from_sub_url(sub.get("subscription_url"))
+            if su:
+                ruser = self._short_map.get(su)
+            if not ruser and bu.get("telegram_id") not in (None, ""):
+                try:
+                    tid = int(bu["telegram_id"])
+                    ruser = self._tgid_map.get(tid) or self._user_map.get(tmpl.format(telegram_id=tid))
+                except (TypeError, ValueError):
+                    ruser = None
+            if not ruser or not ruser.get("uuid"):
+                continue
+
+            try:
+                limit_gb = float(sub.get("traffic_limit_gb") or 0)
+            except (TypeError, ValueError):
+                limit_gb = 0.0
+
+            self._bedolaga_index[ruser["uuid"].lower()] = {
+                "start_date": sub.get("start_date"),
+                "end_date": sub.get("end_date"),
+                "limit_gb": limit_gb,
+                "status": status,
+                "squads": sub.get("connected_squads") or [],
+            }
+            matched += 1
+        logger.info("Bedolaga: %s users fetched, %s subs linked to panel", len(rows), matched)
+
+    def _bedolaga_ctx(self, user_obj: dict):
+        """(augmented_user, sub_ctx | None) для bedolaga mode; иначе (user, None)."""
+        if not self.bedolaga:
+            return user_obj, None
+        ctx = self._bedolaga_index.get((user_obj.get("uuid") or "").lower())
+        if not ctx:
+            return user_obj, None
+        aug = dict(user_obj)
+        if ctx.get("start_date"):
+            aug["subscription_start_date"] = ctx["start_date"]
+        return aug, ctx
 
     def _get_monitored_nodes(self):
         """Discover nodes from the panel and merge local quota policies."""
@@ -221,7 +324,7 @@ class TrafficMonitor:
             return
 
         dry = self.is_dry_run()
-        mode = "subscription" if billing.is_subscription_mode(self.config) else "calendar"
+        mode = billing.billing_mode(self.config)
 
         # Group the limited rows per user so one panel update returns the user to
         # every full squad they need — updating node A must not evict them from
@@ -232,6 +335,7 @@ class TrafficMonitor:
             user_obj = self._uuid_map.get(uuid) or self.api.get_user(uuid)
             if not user_obj:
                 continue
+            user_obj, _bctx = self._bedolaga_ctx(user_obj)
             if not billing.should_unblock_user(u_info, user_obj, self.config):
                 continue
             node = next((n for n in nodes if n.get("uuid") == u_info.get("node_uuid")), nodes[0])
@@ -315,7 +419,7 @@ class TrafficMonitor:
             return
 
         scan_start, scan_end = billing.scan_window_dates(self.config)
-        mode = "subscription" if billing.is_subscription_mode(self.config) else "calendar"
+        mode = billing.billing_mode(self.config)
         logger.info(
             "Limit check: mode=%s, scan %s→%s, dry_run=%s, hysteresis=%s",
             mode, scan_start, scan_end, dry, self.required_checks(),
@@ -363,6 +467,18 @@ class TrafficMonitor:
             if self.db.is_whitelisted(user_uuid):
                 continue
 
+            # bedolaga mode: цикл и лимит — из подписки Bedolaga
+            user_limit_gb = limit_gb
+            if billing.is_bedolaga_mode(self.config):
+                user_obj, bctx = self._bedolaga_ctx(user_obj)
+                if bctx is None:
+                    continue  # нет активной подписки Bedolaga — не наш клиент
+                if bctx["limit_gb"] > 0:
+                    user_limit_gb = bctx["limit_gb"]
+                elif user_limit_gb <= 0:
+                    continue  # ни тарифного, ни нодового лимита
+            user_eff = self.effective_limit_gb(user_limit_gb)
+
             period_key = billing.user_period_key(user_obj, self.config)
             billing_reset = billing.billing_reset_iso(user_obj)
 
@@ -379,57 +495,57 @@ class TrafficMonitor:
             else:
                 traffic_gb = u_stat.get("total", 0) / (1024**3)
 
-            if traffic_gb < effective_limit:
+            if traffic_gb < user_eff:
                 self.db.clear_pending(user_uuid, node_uuid, period_key)
                 continue
 
             # Hysteresis: увеличиваем счетчик проверок
             checks = self.db.bump_pending(
                 user_uuid, username, node_uuid, period_key,
-                traffic_gb, limit_gb, node_name=node_name,
+                traffic_gb, user_limit_gb, node_name=node_name,
             )
             need = self.required_checks()
 
             if checks < need:
                 logger.info(
                     "PENDING %s/%s for %s: %.2f GB >= %.2f GB",
-                    checks, need, username, traffic_gb, effective_limit
+                    checks, need, username, traffic_gb, user_eff
                 )
                 self.db.audit(
                     "limit_pending", user_uuid=user_uuid, username=username, node_name=node_name,
-                    details={"traffic_gb": traffic_gb, "limit_gb": limit_gb, "checks": checks, "need": need},
+                    details={"traffic_gb": traffic_gb, "limit_gb": user_limit_gb, "checks": checks, "need": need},
                     dry_run=dry,
                 )
-                self._notify_verification_pending(username, node_name, traffic_gb, limit_gb, checks, need, dry)
+                self._notify_verification_pending(username, node_name, traffic_gb, user_limit_gb, checks, need, dry)
                 continue
 
             # Если достигли нужного кол-ва проверок — применяем лимит
             logger.info(
                 "%s %s: %.2f GB >= %.2f GB",
-                "[DRY-RUN]" if dry else "LIMIT", username, traffic_gb, effective_limit
+                "[DRY-RUN]" if dry else "LIMIT", username, traffic_gb, user_eff
             )
 
             if dry:
                 self.db.clear_pending(user_uuid, node_uuid, period_key)
                 self.db.audit(
                     "limit_verified_dry", user_uuid=user_uuid, username=username, node_name=node_name,
-                    details={"traffic_gb": traffic_gb, "limit_gb": limit_gb}, dry_run=True,
+                    details={"traffic_gb": traffic_gb, "limit_gb": user_limit_gb}, dry_run=True,
                 )
-                self._notify_verification_passed(username, node_name, traffic_gb, limit_gb, dry=True)
+                self._notify_verification_passed(username, node_name, traffic_gb, user_limit_gb, dry=True)
                 continue
 
             # РЕАЛЬНОЕ ДЕЙСТВИЕ
             if self.api.set_user_external_squad(user_uuid, limited_external, remove_from_all=True):
                 self.db.add_limited(
                     user_uuid, username, node_uuid, node_name,
-                    traffic_gb, limit_gb, dry_run=False, period_key=period_key,
+                    traffic_gb, user_limit_gb, dry_run=False, period_key=period_key,
                     billing_reset_at=billing_reset,
                 )
                 self.db.audit(
                     "limit_enforce", user_uuid=user_uuid, username=username, node_name=node_name,
-                    details={"traffic_gb": traffic_gb, "limit_gb": limit_gb}, dry_run=False,
+                    details={"traffic_gb": traffic_gb, "limit_gb": user_limit_gb}, dry_run=False,
                 )
-                self._notify_verification_passed(username, node_name, traffic_gb, limit_gb, dry=False)
+                self._notify_verification_passed(username, node_name, traffic_gb, user_limit_gb, dry=False)
             else:
                 logger.error("Failed to limit %s", username)
 

@@ -25,6 +25,12 @@ def load_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
             "reset_day": 1,
             "subscription_cycle_days": 30
         },
+        "bedolaga": {
+            "base_url": "",
+            "token": "",
+            "timeout": 15,
+            "username_template": "user_{telegram_id}"
+        },
         "traffic_cost": {"currency": "₽", "price_per_gb": 0}
         ,"nodes": {"auto_discover": False, "include_disabled": False, "policies": {}}
     }
@@ -65,6 +71,13 @@ def _validate_config(config: Dict[str, Any]) -> None:
     billing = config.get("billing") or {}
     if int(billing.get("subscription_cycle_days", 30)) <= 0:
         raise ValueError("billing.subscription_cycle_days must be positive")
+    mode = billing.get("mode", "subscription")
+    if mode not in ("subscription", "calendar", "bedolaga"):
+        raise ValueError("billing.mode must be one of: subscription, calendar, bedolaga")
+    if mode == "bedolaga":
+        bed = config.get("bedolaga") or {}
+        if not bed.get("base_url") or not bed.get("token") or str(bed.get("token")).startswith("your_"):
+            raise ValueError("billing.mode=bedolaga requires bedolaga.base_url and bedolaga.token")
     if int(config.get("check_interval_minutes", 10)) <= 0:
         raise ValueError("check_interval_minutes must be positive")
     nodes_cfg = config.get("nodes") or {}

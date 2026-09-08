@@ -123,6 +123,69 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
 
 
+class BedolagaTests(unittest.TestCase):
+    def test_short_uuid_from_sub_url(self):
+        from bedolaga import short_uuid_from_sub_url
+        self.assertEqual(
+            short_uuid_from_sub_url("https://sub.example.com/aB3xY9zK"), "aB3xY9zK"
+        )
+        self.assertEqual(
+            short_uuid_from_sub_url("https://sub.example.com/path/aB3xY9zK/"), "aB3xY9zK"
+        )
+        self.assertIsNone(short_uuid_from_sub_url(""))
+        self.assertIsNone(short_uuid_from_sub_url(None))
+
+    def test_bedolaga_mode_uses_tariff_limit_and_start_date(self):
+        from monitor import TrafficMonitor
+        GB = 1024 ** 3
+
+        class FakeRemna:
+            def get_users(self, limit=5000):
+                return [{"uuid": "ru-1", "username": "user_777", "shortUuid": "SHORT1",
+                         "telegramId": 777, "createdAt": "2026-01-01T00:00:00Z"}]
+
+            def get_nodes(self):
+                return []
+
+            def get_user(self, uuid):
+                return None
+
+            def get_node_bandwidth(self, node_uuid, start, end, top_limit=100):
+                return [{"username": "user_777", "uuid": "ru-1", "total": 12 * GB}]
+
+        class FakeBedolaga:
+            def iter_users(self):
+                start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
+                return iter([{
+                    "telegram_id": 777,
+                    "subscription": {
+                        "status": "active", "start_date": start,
+                        "traffic_limit_gb": 10,
+                        "subscription_url": "https://sub.example.com/SHORT1",
+                        "connected_squads": [],
+                    },
+                }])
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        db = QuotaDatabase(path)
+        cfg = {
+            "billing": {"mode": "bedolaga", "subscription_cycle_days": 30},
+            "bedolaga": {"base_url": "http://x", "token": "t"},
+            "monitored_nodes": [{"uuid": "n1", "name": "n1", "limit_gb": 999,
+                                 "limited_external_squad_uuid": "lim"}],
+            "dry_run": True,
+        }
+        m = TrafficMonitor(FakeRemna(), db, cfg)
+        m.bedolaga = FakeBedolaga()
+        result = m.evaluate()
+        row = next((r for r in result["rows"] if r["username"] == "user_777"), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["limit_gb"], 10.0)        # tariff limit, not node's 999
+        self.assertEqual(row["verdict"], "over")       # 12 GB >= 10 GB tariff
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):
