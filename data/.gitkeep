@@ -1,0 +1,1 @@
+# keep this directory in git; the SQLite DB is created here at runtime

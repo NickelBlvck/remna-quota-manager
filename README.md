@@ -229,6 +229,7 @@ nano config.json  # вставить токены, UUID сквадов, chat_id
 
 # 5. Отдельный системный пользователь + права
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin remna-quota
+sudo mkdir -p /opt/remna-quota-manager/data   # обязан существовать до старта (ReadWritePaths= в юните)
 sudo chown -R remna-quota:remna-quota /opt/remna-quota-manager
 sudo chmod 750 /opt/remna-quota-manager/data
 
@@ -291,6 +292,7 @@ sudo systemctl restart remna-quota.service
 | `error: externally-managed-environment` при `pip install` | Debian 12+/PEP 668 | Ставить в venv: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` |
 | `sqlite3.OperationalError: attempt to write a readonly database` | Права на папку `data/` | `sudo chown -R remna-quota:remna-quota data/` |
 | `status=203/EXEC` у сервиса | В `ExecStart` неверный путь к python venv | Проверь, что `/opt/remna-quota-manager/.venv/bin/python` существует |
+| `status=226/NAMESPACE`, `Failed to set up mount namespacing: .../data` | Каталог `data/` не существует, а он указан в `ReadWritePaths=` | `sudo mkdir -p /opt/remna-quota-manager/data && sudo chown remna-quota: /opt/remna-quota-manager/data` |
 | `API 404 GET /api/bandwidth-stats/.../users/{uuid}` | Несуществующий per-user эндпоинт | Использовать только `get_node_bandwidth()` (bulk) |
 | Отчёт не приходит | Неправильное окно времени | Проверить `daily_summary_hour` и `window_minutes` |
 | Пользователь не разблокируется | `billing_reset_at` не сохранён | Убедиться, что `add_limited()` передаёт `billing_reset_at` |
