@@ -34,9 +34,13 @@
 ├── settings.py             # Загрузка config.json с дефолтами
 ├── utils_cost.py           # Форматирование стоимости трафика
 ├── db_tool.py              # CLI: list/unblock/audit/export для БД
-├── config.json             # Конфигурация (шаблон в репо)
+├── config.json             # Конфигурация (шаблон в репо), в образ НЕ попадает
 ├── requirements.txt        # Зависимости Python
-└── remna-quota.service     # systemd unit для автозапуска
+├── healthcheck.py          # Docker HEALTHCHECK: свежесть heartbeat монитора
+├── Dockerfile              # python:3.12-slim, non-root, tini
+├── docker-compose.yml      # деплой из GHCR
+├── .github/workflows/      # CI: тесты → сборка → push в ghcr.io
+└── remna-quota.service     # systemd unit (устаревший путь)
 ```
 
 ---
@@ -235,6 +239,22 @@ squad выбирается из той же ноды, в которой было
 ---
 
 ## 🚀 Быстрый старт
+
+### Docker (рекомендуется) — [DEPLOY.md](DEPLOY.md)
+
+```bash
+mkdir -p /opt/remna-quota && cd /opt/remna-quota
+curl -O https://raw.githubusercontent.com/NickelBlvck/remna-quota-manager/master/docker-compose.yml
+curl -o config.json https://raw.githubusercontent.com/NickelBlvck/remna-quota-manager/master/config.sample.json
+nano config.json
+docker compose pull && docker compose up -d
+```
+
+Обновление: `docker compose pull && docker compose up -d`. Образ собирается в
+GitHub Actions и лежит в GHCR. Полный гайд (реестр, приватный доступ, бэкапы,
+Watchtower, Bedolaga в соседней сети) — в [DEPLOY.md](DEPLOY.md).
+
+### Вручную через systemd (устаревший путь)
 
 ```bash
 # 1. Клонировать/создать структуру

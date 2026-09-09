@@ -11,6 +11,8 @@ env/
 # Secrets & Configs
 .env
 config.json
+config.local.json
+docker-compose.override.yml
 *.key
 *.pem
 

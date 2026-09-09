@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import billing
@@ -441,6 +441,10 @@ class TrafficMonitor:
                 self.db.purge_stale_approvals(self.db.current_period_key())
             except Exception as e:
                 logger.error("Loop error: %s", e, exc_info=True)
+            try:
+                self.db.set_setting("heartbeat_at", datetime.now(timezone.utc).isoformat())
+            except Exception:  # noqa: BLE001 - heartbeat must never break the loop
+                pass
             time.sleep(interval)
 
     def check_limits(self):

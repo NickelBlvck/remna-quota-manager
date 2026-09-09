@@ -1,0 +1,41 @@
+# remna-quota-manager — деплой из готового образа.
+# 1. Положи рядом config.json (см. config.sample.json).
+# 2. docker compose pull && docker compose up -d
+#
+# Образ собирается в GitHub Actions и публикуется в GHCR.
+# Замени nickelblvck на свой GitHub-логин (только нижний регистр), если отличается.
+
+services:
+  quota-manager:
+    image: ghcr.io/nickelblvck/remna-quota-manager:latest
+    container_name: remna-quota-manager
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+
+    environment:
+      TZ: Europe/Moscow            # для daily_summary_hour (локальное время)
+      HEALTHCHECK_STALE_MINUTES: "30"
+
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - quota-data:/app/data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # Если Bedolaga крутится в соседнем compose на этом же хосте и его API
+    # слушает только во внутренней сети — подключись к ней:
+    # networks:
+    #   - default
+    #   - bedolaga_default
+
+volumes:
+  quota-data:
+
+# networks:
+#   bedolaga_default:
+#     external: true
