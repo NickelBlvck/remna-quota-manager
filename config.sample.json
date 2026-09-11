@@ -1,7 +1,8 @@
 {
   "panel": {
     "base_url": "https://panel.example.com",
-    "token": "PUT_PANEL_TOKEN_HERE"
+    "token": "PUT_PANEL_TOKEN_HERE",
+    "secret_key": ""
   },
   "telegram": {
     "bot_token": "PUT_TELEGRAM_BOT_TOKEN_HERE",

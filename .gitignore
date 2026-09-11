@@ -27,3 +27,8 @@ data/*.db-wal
 # IDE
 .vscode/
 .idea/
+
+# Local tooling / scratch — not part of the project
+.agents/
+skills-lock.json
+/remna-quota-manager/

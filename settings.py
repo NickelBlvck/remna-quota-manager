@@ -10,7 +10,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 def load_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
     """Загружает конфиг с дефолтами"""
     defaults = {
-        "panel": {"base_url": "", "token": ""},
+        "panel": {"base_url": "", "token": "", "secret_key": ""},
         "telegram": {
             "daily_summary_hour": 9,
             "daily_summary_window_minutes": 5

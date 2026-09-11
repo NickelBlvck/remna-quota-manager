@@ -20,7 +20,10 @@ def main():
     if cmd == "check":
         from monitor import TrafficMonitor
         config = load_config()
-        api = RemnawaveAPI(config["panel"]["base_url"], config["panel"]["token"])
+        api = RemnawaveAPI(
+            config["panel"]["base_url"], config["panel"]["token"],
+            secret_key=config["panel"].get("secret_key"),
+        )
         result = TrafficMonitor(api, db, config).evaluate()
         mode = "DRY-RUN" if result["dry_run"] else "БОЕВОЙ"
         rows = result["rows"]
@@ -57,7 +60,10 @@ def main():
             return
         uuid = args.uuid.lower()
         config = load_config()
-        api = RemnawaveAPI(config["panel"]["base_url"], config["panel"]["token"])
+        api = RemnawaveAPI(
+            config["panel"]["base_url"], config["panel"]["token"],
+            secret_key=config["panel"].get("secret_key"),
+        )
         records = [row for row in db.list_limited() if row["uuid"] == uuid and not row["dry_run"]]
         if not records:
             print("UUID is not present in local limits")

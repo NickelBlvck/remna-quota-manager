@@ -46,7 +46,8 @@ def main():
             
         api = RemnawaveAPI(
             base_url=panel_cfg["base_url"],
-            token=panel_cfg["token"]
+            token=panel_cfg["token"],
+            secret_key=panel_cfg.get("secret_key"),
         )
         logger.info("✅ API Client initialized")
 

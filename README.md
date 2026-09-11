@@ -137,7 +137,8 @@ else:
 {
   "panel": {
     "base_url": "https://api.pozor.pw",
-    "token": "your_token"
+    "token": "your_token",
+    "secret_key": ""
   },
   "telegram": {
     "bot_token": "bot_token",
@@ -164,6 +165,31 @@ else:
   "check_interval_minutes": 10
 }
 ```
+
+### Панель за камуфляж-прокси (eGamesAPI/remnawave-reverse-proxy)
+
+Если панель стоит за [remnawave-reverse-proxy](https://github.com/eGamesAPI/remnawave-reverse-proxy)
+(nginx-камуфляж, прячет панель от сканеров — любой запрос без секретной куки,
+**включая `/api/*`**, получает decoy-страницу вместо ответа API), одного токена
+недостаточно: `panel.token` без куки будет стабильно ловить не-JSON ответ или decoy.
+
+Нужна секретная кука прокси — тот же `NAME:VALUE`, что использует Bedolaga в
+`REMNAWAVE_SECRET_KEY`:
+
+```json
+"panel": {
+  "base_url": "https://api.pozor.pw",
+  "token": "your_token",
+  "secret_key": "aEmFnBcC:WbYWpixX"
+}
+```
+
+`RemnawaveAPI` кладёт её в cookie-jar HTTP-сессии (`remnawave.py`) — уходит на все
+запросы к `base_url` вместе с `Authorization: Bearer`, куда-либо ещё ходить не
+нужно (VPN/SSH-туннель — не нужны, если Bearer-токен + эта кука реально
+пропускаются прокси). Найти пару: `nginx.conf` панели → `map $http_cookie
+$auth_cookie` → значение после `"~*`. Формат подтверждён доками самого прокси
+(`docs/configuration/external-api.mdx`).
 
 ### Несколько серверов
 

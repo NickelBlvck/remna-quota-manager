@@ -291,6 +291,23 @@ class ApprovalFlowTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class RemnawaveSecretCookieTests(unittest.TestCase):
+    def test_secret_key_sets_session_cookie(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok", secret_key="aEmFnBcC:WbYWpixX")
+        self.assertEqual(api.session.cookies.get("aEmFnBcC"), "WbYWpixX")
+
+    def test_missing_secret_key_sets_no_cookie(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        self.assertEqual(len(api.session.cookies), 0)
+
+    def test_malformed_secret_key_is_ignored(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok", secret_key="no-colon-here")
+        self.assertEqual(len(api.session.cookies), 0)
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 class RemnawaveAPI:
-    def __init__(self, base_url: str, token: str, timeout: int = 15):
+    def __init__(self, base_url: str, token: str, timeout: int = 15, secret_key: Optional[str] = None):
         self.base_url = base_url.rstrip('/')
         self.headers = {
             "Authorization": f"Bearer {token}",
@@ -15,6 +15,19 @@ class RemnawaveAPI:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+
+        # Панели за камуфляж-прокси (eGamesAPI/remnawave-reverse-proxy) отдают
+        # decoy-страницу всем, у кого нет секретной куки "NAME:VALUE" — тот же
+        # формат, что REMNAWAVE_SECRET_KEY у Bedolaga. Кука привязана к этой
+        # сессии и уходит на все обращения к base_url, включая /api/*.
+        if secret_key and ":" in secret_key:
+            cookie_name, _, cookie_value = secret_key.partition(":")
+            cookie_name, cookie_value = cookie_name.strip(), cookie_value.strip()
+            if cookie_name and cookie_value:
+                self.session.cookies.set(cookie_name, cookie_value)
+                logger.info("Panel secret cookie configured (name=%s)", cookie_name)
+            else:
+                logger.warning("panel.secret_key set but malformed (expected NAME:VALUE)")
 
     _RETRYABLE = (429, 500, 502, 503, 504)
 
