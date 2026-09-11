@@ -342,6 +342,11 @@ class NodeResolutionTests(unittest.TestCase):
         cfg = {"monitored_nodes": [{"uuid": "n1", "limit_gb": 5}]}
         self.assertEqual(resolve_monitored_nodes(None, cfg), cfg["monitored_nodes"])
 
+    def test_empty_policy_dict_is_present_but_incomplete_not_missing(self):
+        # {} is a real (if useless) policy — must not be confused with "no policy".
+        cfg = {"nodes": {"auto_discover": True, "policies": {"n1": {}}}}
+        self.assertEqual(resolve_monitored_nodes(self._FakeAPI(), cfg), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,14 +39,26 @@ def resolve_monitored_nodes(api, config: Dict[str, Any]) -> List[Dict[str, Any]]
             continue
         if remote.get("isDisabled") and not nodes_cfg.get("include_disabled", False):
             continue
-        policy = (
-            policies.get(uuid)
-            or policies.get(name)
-            or legacy.get(uuid)
-            or legacy.get(name)
-        )
-        if not policy:
+        # По наличию ключа, а не по истинности значения — пустой словарь {} тоже
+        # валидный "есть policy, но без полей" случай, его нельзя путать с
+        # "policy вообще нет".
+        policy = None
+        for source, key in ((policies, uuid), (policies, name), (legacy, uuid), (legacy, name)):
+            if key in source:
+                policy = source[key]
+                break
+        if policy is None:
             logger.warning("Discovered node %s (%s) has no local policy; skipping", name, uuid)
+            continue
+        missing = [
+            f for f in ("limit_gb", "limited_external_squad_uuid")
+            if not (isinstance(policy, dict) and policy.get(f))
+        ]
+        if missing:
+            logger.warning(
+                "Discovered node %s (%s) has a policy but it's missing %s; skipping",
+                name, uuid, ", ".join(missing),
+            )
             continue
         merged = dict(remote)
         merged.update(policy)
