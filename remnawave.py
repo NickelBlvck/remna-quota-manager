@@ -73,11 +73,38 @@ class RemnawaveAPI:
             return data
         return None
 
-    def get_users(self, limit: int = 500) -> List[Dict]:
-        raw = self._request('GET', f'/api/users?limit={limit}')
-        if isinstance(raw, dict) and 'users' in raw:
-            return raw['users']
-        return raw if isinstance(raw, list) else []
+    def get_users(self, limit: int = 5000, page_size: int = 250) -> List[Dict]:
+        """GET /api/users is paginated server-side (``{"total": N, "users": [...]}}``)
+        and does not respect a page-size override — a plain ``?limit=`` (or even
+        documented ``skip``/``take``) still comes back capped at the server's own
+        default page. So walk pages via ``skip``, following the response's own
+        ``total``, until every user is collected or ``limit`` is reached.
+        """
+        users: List[Dict] = []
+        skip = 0
+        total: Optional[int] = None
+        max_pages = 200  # safety net against a server that never advances skip
+        for _ in range(max_pages):
+            raw = self._request(
+                'GET', '/api/users',
+                params={'skip': skip, 'take': page_size, 'limit': page_size, 'offset': skip},
+            )
+            if not isinstance(raw, dict):
+                break
+            page = raw.get('users')
+            if page is None and isinstance(raw.get('data'), list):
+                page = raw['data']
+            if not isinstance(page, list) or not page:
+                break
+            users.extend(page)
+            if isinstance(raw.get('total'), int):
+                total = raw['total']
+            skip += len(page)
+            if len(users) >= limit:
+                break
+            if total is not None and skip >= total:
+                break
+        return users[:limit]
 
     def get_nodes(self) -> List[Dict]:
         """Return the current node list from the panel."""

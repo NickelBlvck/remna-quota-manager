@@ -313,6 +313,38 @@ class RemnawaveSecretCookieTests(unittest.TestCase):
         self.assertEqual(len(api.session.cookies), 0)
 
 
+class RemnawaveGetUsersPaginationTests(unittest.TestCase):
+    def test_walks_pages_ignoring_requested_page_size(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        all_users = [{"uuid": f"u{i}", "username": f"user{i}"} for i in range(63)]
+
+        def fake_request(method, path, **kwargs):
+            # Server always answers with a fixed 25-user page, ignoring take/limit,
+            # but does respect skip — exactly what was observed against a real panel.
+            skip = kwargs.get("params", {}).get("skip", 0)
+            page = all_users[skip:skip + 25]
+            return {"total": len(all_users), "users": page}
+
+        api._request = fake_request
+        result = api.get_users(limit=5000)
+        self.assertEqual(len(result), 63)
+        self.assertEqual([u["uuid"] for u in result], [f"u{i}" for i in range(63)])
+
+    def test_stops_at_requested_limit(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        all_users = [{"uuid": f"u{i}"} for i in range(63)]
+
+        def fake_request(method, path, **kwargs):
+            skip = kwargs.get("params", {}).get("skip", 0)
+            return {"total": len(all_users), "users": all_users[skip:skip + 25]}
+
+        api._request = fake_request
+        result = api.get_users(limit=10)
+        self.assertEqual(len(result), 10)
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):
