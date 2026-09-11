@@ -73,22 +73,50 @@ class RemnawaveAPI:
             return data
         return None
 
-    def get_users(self, limit: int = 5000, page_size: int = 250) -> List[Dict]:
-        """GET /api/users is paginated server-side (``{"total": N, "users": [...]}}``)
-        and does not respect a page-size override — a plain ``?limit=`` (or even
-        documented ``skip``/``take``) still comes back capped at the server's own
-        default page. So walk pages via ``skip``, following the response's own
-        ``total``, until every user is collected or ``limit`` is reached.
+    def get_users(self, limit: int = 5000, page_size: int = 1000) -> List[Dict]:
+        """Fetch every user, paginating properly.
+
+        Primary path: ``GET /api/users/stream`` (cursor pagination — ``size``
+        up to 1000, response carries ``hasMore``/``nextCursor``). This is what
+        Remnawave's own ecosystem (e.g. the Bedolaga bot) uses for full
+        enumeration; plain ``GET /api/users`` always answers with its own
+        fixed-size default page no matter what page-size param is sent
+        (confirmed against a live panel: ``?limit=``, ``skip``/``take`` alike
+        all came back capped), so it's kept only as a fallback for panels
+        without ``/stream``, walking it via ``start``/``size``.
         """
+        users = self._get_users_stream(limit, page_size)
+        if users:
+            return users
+        return self._get_users_legacy_paginated(limit, page_size)
+
+    def _get_users_stream(self, limit: int, page_size: int) -> List[Dict]:
         users: List[Dict] = []
-        skip = 0
+        cursor = None
+        for _ in range(200):  # safety net against a server that never stops hasMore
+            params: Dict[str, Any] = {"size": min(page_size, 1000)}
+            if cursor is not None:
+                params["cursor"] = cursor
+            raw = self._request('GET', '/api/users/stream', params=params)
+            if not isinstance(raw, dict):
+                break
+            page = raw.get('users')
+            if not isinstance(page, list) or not page:
+                break
+            users.extend(page)
+            if len(users) >= limit:
+                break
+            if not raw.get('hasMore') or raw.get('nextCursor') is None:
+                break
+            cursor = raw['nextCursor']
+        return users[:limit]
+
+    def _get_users_legacy_paginated(self, limit: int, page_size: int) -> List[Dict]:
+        users: List[Dict] = []
+        start = 0
         total: Optional[int] = None
-        max_pages = 200  # safety net against a server that never advances skip
-        for _ in range(max_pages):
-            raw = self._request(
-                'GET', '/api/users',
-                params={'skip': skip, 'take': page_size, 'limit': page_size, 'offset': skip},
-            )
+        for _ in range(200):
+            raw = self._request('GET', '/api/users', params={"start": start, "size": page_size})
             if not isinstance(raw, dict):
                 break
             page = raw.get('users')
@@ -99,10 +127,10 @@ class RemnawaveAPI:
             users.extend(page)
             if isinstance(raw.get('total'), int):
                 total = raw['total']
-            skip += len(page)
+            start += len(page)
             if len(users) >= limit:
                 break
-            if total is not None and skip >= total:
+            if total is not None and start >= total:
                 break
         return users[:limit]
 

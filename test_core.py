@@ -314,35 +314,54 @@ class RemnawaveSecretCookieTests(unittest.TestCase):
 
 
 class RemnawaveGetUsersPaginationTests(unittest.TestCase):
-    def test_walks_pages_ignoring_requested_page_size(self):
+    def test_walks_stream_cursor_pages(self):
         from remnawave import RemnawaveAPI
         api = RemnawaveAPI("https://panel.example.com", "tok")
         all_users = [{"uuid": f"u{i}", "username": f"user{i}"} for i in range(63)]
+        page_size = 25
 
         def fake_request(method, path, **kwargs):
-            # Server always answers with a fixed 25-user page, ignoring take/limit,
-            # but does respect skip — exactly what was observed against a real panel.
-            skip = kwargs.get("params", {}).get("skip", 0)
-            page = all_users[skip:skip + 25]
-            return {"total": len(all_users), "users": page}
+            self.assertEqual(path, '/api/users/stream')
+            cursor = kwargs.get("params", {}).get("cursor", 0) or 0
+            page = all_users[cursor:cursor + page_size]
+            next_cursor = cursor + len(page)
+            return {"users": page, "hasMore": next_cursor < len(all_users), "nextCursor": next_cursor}
 
         api._request = fake_request
-        result = api.get_users(limit=5000)
+        result = api.get_users(limit=5000, page_size=page_size)
         self.assertEqual(len(result), 63)
         self.assertEqual([u["uuid"] for u in result], [f"u{i}" for i in range(63)])
 
-    def test_stops_at_requested_limit(self):
+    def test_stream_stops_at_requested_limit(self):
         from remnawave import RemnawaveAPI
         api = RemnawaveAPI("https://panel.example.com", "tok")
         all_users = [{"uuid": f"u{i}"} for i in range(63)]
 
         def fake_request(method, path, **kwargs):
-            skip = kwargs.get("params", {}).get("skip", 0)
-            return {"total": len(all_users), "users": all_users[skip:skip + 25]}
+            cursor = kwargs.get("params", {}).get("cursor", 0) or 0
+            page = all_users[cursor:cursor + 25]
+            next_cursor = cursor + len(page)
+            return {"users": page, "hasMore": next_cursor < len(all_users), "nextCursor": next_cursor}
 
         api._request = fake_request
         result = api.get_users(limit=10)
         self.assertEqual(len(result), 10)
+
+    def test_falls_back_to_legacy_paginated_users_when_stream_missing(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        all_users = [{"uuid": f"u{i}"} for i in range(40)]
+
+        def fake_request(method, path, **kwargs):
+            if path == '/api/users/stream':
+                return None  # 404 on older panels
+            start = kwargs.get("params", {}).get("start", 0)
+            page = all_users[start:start + 25]
+            return {"total": len(all_users), "users": page}
+
+        api._request = fake_request
+        result = api.get_users(limit=5000)
+        self.assertEqual(len(result), 40)
 
 
 class NodeResolutionTests(unittest.TestCase):
