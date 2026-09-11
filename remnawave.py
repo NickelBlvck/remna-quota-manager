@@ -74,21 +74,37 @@ class RemnawaveAPI:
         return None
 
     def get_users(self, limit: int = 5000, page_size: int = 1000) -> List[Dict]:
-        """Fetch every user, paginating properly.
+        """Fetch every user, paginating properly and verifying we actually got
+        everyone.
 
-        Primary path: ``GET /api/users/stream`` (cursor pagination — ``size``
-        up to 1000, response carries ``hasMore``/``nextCursor``). This is what
-        Remnawave's own ecosystem (e.g. the Bedolaga bot) uses for full
-        enumeration; plain ``GET /api/users`` always answers with its own
-        fixed-size default page no matter what page-size param is sent
-        (confirmed against a live panel: ``?limit=``, ``skip``/``take`` alike
-        all came back capped), so it's kept only as a fallback for panels
-        without ``/stream``, walking it via ``start``/``size``.
+        ``GET /api/users/stream`` (cursor pagination — ``size`` up to 1000,
+        response carries ``hasMore``/``nextCursor``) is what Remnawave's own
+        ecosystem (e.g. the Bedolaga bot) uses for full enumeration, and is
+        usually complete in one request. But it's been observed to come back
+        short on a live panel — a page mid-walk silently returning fewer users
+        (``hasMore``/``nextCursor`` still looked "done") — with no error, so a
+        naive "non-empty means it worked" check isn't safe. We cross-check the
+        stream result against the authoritative ``total`` from a cheap
+        ``GET /api/users`` call and, if short, fall back to walking that
+        endpoint's own ``start``/``size`` pagination (slower, but every page
+        observed against this panel has been consistent and deterministic).
         """
-        users = self._get_users_stream(limit, page_size)
-        if users:
-            return users
+        total = self._get_users_total()
+        stream_users = self._get_users_stream(limit, page_size)
+        if stream_users and (total is None or len(stream_users) >= min(total, limit)):
+            return stream_users
+        if stream_users:
+            logger.warning(
+                "GET /api/users/stream returned %s of %s users; falling back to /api/users pagination",
+                len(stream_users), total,
+            )
         return self._get_users_legacy_paginated(limit, page_size)
+
+    def _get_users_total(self) -> Optional[int]:
+        raw = self._request('GET', '/api/users', params={"start": 0, "size": 1})
+        if isinstance(raw, dict) and isinstance(raw.get('total'), int):
+            return raw['total']
+        return None
 
     def _get_users_stream(self, limit: int, page_size: int) -> List[Dict]:
         users: List[Dict] = []

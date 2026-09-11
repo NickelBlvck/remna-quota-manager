@@ -314,21 +314,45 @@ class RemnawaveSecretCookieTests(unittest.TestCase):
 
 
 class RemnawaveGetUsersPaginationTests(unittest.TestCase):
+    @staticmethod
+    def _stream_and_legacy_fake(all_users, page_size=25, stream_cuts_off_after=None):
+        """(fake_request, calls) — a _request stub serving both /api/users/stream
+        (cursor) and /api/users (start/size) from the same backing list.
+        ``stream_cuts_off_after`` simulates the observed real-world flake: the
+        stream reports done (hasMore=False) after N pages even though more
+        users exist.
+        """
+        calls = {"stream_pages": 0}
+
+        def fake_request(method, path, **kwargs):
+            params = kwargs.get("params", {}) or {}
+            if path == '/api/users/stream':
+                calls["stream_pages"] += 1
+                if stream_cuts_off_after is not None and calls["stream_pages"] > stream_cuts_off_after:
+                    return {"users": [], "hasMore": False, "nextCursor": None}
+                cursor = params.get("cursor", 0) or 0
+                page = all_users[cursor:cursor + page_size]
+                next_cursor = cursor + len(page)
+                more = next_cursor < len(all_users)
+                if stream_cuts_off_after is not None and calls["stream_pages"] >= stream_cuts_off_after:
+                    more = False  # falsely claims done
+                return {"users": page, "hasMore": more, "nextCursor": next_cursor}
+            if path == '/api/users':
+                start = params.get("start", 0)
+                size = params.get("size", page_size)
+                page = all_users[start:start + size]
+                return {"total": len(all_users), "users": page}
+            return None
+
+        return fake_request, calls
+
     def test_walks_stream_cursor_pages(self):
         from remnawave import RemnawaveAPI
         api = RemnawaveAPI("https://panel.example.com", "tok")
         all_users = [{"uuid": f"u{i}", "username": f"user{i}"} for i in range(63)]
-        page_size = 25
-
-        def fake_request(method, path, **kwargs):
-            self.assertEqual(path, '/api/users/stream')
-            cursor = kwargs.get("params", {}).get("cursor", 0) or 0
-            page = all_users[cursor:cursor + page_size]
-            next_cursor = cursor + len(page)
-            return {"users": page, "hasMore": next_cursor < len(all_users), "nextCursor": next_cursor}
-
-        api._request = fake_request
-        result = api.get_users(limit=5000, page_size=page_size)
+        fake, _ = self._stream_and_legacy_fake(all_users, page_size=25)
+        api._request = fake
+        result = api.get_users(limit=5000, page_size=25)
         self.assertEqual(len(result), 63)
         self.assertEqual([u["uuid"] for u in result], [f"u{i}" for i in range(63)])
 
@@ -336,14 +360,8 @@ class RemnawaveGetUsersPaginationTests(unittest.TestCase):
         from remnawave import RemnawaveAPI
         api = RemnawaveAPI("https://panel.example.com", "tok")
         all_users = [{"uuid": f"u{i}"} for i in range(63)]
-
-        def fake_request(method, path, **kwargs):
-            cursor = kwargs.get("params", {}).get("cursor", 0) or 0
-            page = all_users[cursor:cursor + 25]
-            next_cursor = cursor + len(page)
-            return {"users": page, "hasMore": next_cursor < len(all_users), "nextCursor": next_cursor}
-
-        api._request = fake_request
+        fake, _ = self._stream_and_legacy_fake(all_users, page_size=25)
+        api._request = fake
         result = api.get_users(limit=10)
         self.assertEqual(len(result), 10)
 
@@ -362,6 +380,19 @@ class RemnawaveGetUsersPaginationTests(unittest.TestCase):
         api._request = fake_request
         result = api.get_users(limit=5000)
         self.assertEqual(len(result), 40)
+
+    def test_falls_back_when_stream_silently_under_delivers(self):
+        # Reproduces what was observed against a live panel: /stream reports
+        # hasMore=False (or just stops) after fewer users than total — must
+        # not be trusted just because it returned a non-empty, well-formed page.
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        all_users = [{"uuid": f"u{i}", "username": f"user{i}"} for i in range(138)]
+        fake, calls = self._stream_and_legacy_fake(all_users, page_size=25, stream_cuts_off_after=1)
+        api._request = fake
+        result = api.get_users(limit=5000)
+        self.assertEqual(len(result), 138)
+        self.assertEqual({u["uuid"] for u in result}, {f"u{i}" for i in range(138)})
 
 
 class NodeResolutionTests(unittest.TestCase):
