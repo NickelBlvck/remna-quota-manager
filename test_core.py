@@ -292,9 +292,14 @@ class ApprovalFlowTests(unittest.TestCase):
 
 
 class RemnawaveSecretCookieTests(unittest.TestCase):
-    def test_secret_key_sets_session_cookie(self):
+    def test_secret_key_sets_session_cookie_with_colon(self):
         from remnawave import RemnawaveAPI
         api = RemnawaveAPI("https://panel.example.com", "tok", secret_key="aEmFnBcC:WbYWpixX")
+        self.assertEqual(api.session.cookies.get("aEmFnBcC"), "WbYWpixX")
+
+    def test_secret_key_sets_session_cookie_with_equals(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok", secret_key="aEmFnBcC=WbYWpixX")
         self.assertEqual(api.session.cookies.get("aEmFnBcC"), "WbYWpixX")
 
     def test_missing_secret_key_sets_no_cookie(self):

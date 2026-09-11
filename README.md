@@ -173,14 +173,17 @@ else:
 **включая `/api/*`**, получает decoy-страницу вместо ответа API), одного токена
 недостаточно: `panel.token` без куки будет стабильно ловить не-JSON ответ или decoy.
 
-Нужна секретная кука прокси — тот же `NAME:VALUE`, что использует Bedolaga в
-`REMNAWAVE_SECRET_KEY`:
+Нужна секретная кука прокси — тот же секрет, что использует Bedolaga в
+`REMNAWAVE_SECRET_KEY`. Разделитель между именем и значением куки может быть
+`:` (так его называют в комментарии `.env` Bedolaga) или `=` (буквальный
+формат из доки самого eGames-прокси, `?NAME=VALUE`) — вставляй как есть, парсер
+понимает оба:
 
 ```json
 "panel": {
   "base_url": "https://api.pozor.pw",
   "token": "your_token",
-  "secret_key": "aEmFnBcC:WbYWpixX"
+  "secret_key": "aEmFnBcC=WbYWpixX"
 }
 ```
 
