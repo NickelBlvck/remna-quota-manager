@@ -73,6 +73,19 @@ class RemnawaveAPI:
             return data
         return None
 
+    @staticmethod
+    def _normalize_user(u: Dict) -> Dict:
+        """Current Remnawave versions dropped `uuid` from the user model —
+        the identifier is the numeric `id` (REST paths and the update body
+        both use it: ``GET/PATCH /api/users/:userId``). Every place in this
+        codebase keys off ``user["uuid"]``, so inject it once here
+        (``str(id)``) rather than touch every call site.
+        """
+        if isinstance(u, dict) and not u.get('uuid') and u.get('id') is not None:
+            u = dict(u)
+            u['uuid'] = str(u['id'])
+        return u
+
     def get_users(self, limit: int = 5000, page_size: int = 1000) -> List[Dict]:
         """Fetch every user, paginating properly and verifying we actually got
         everyone.
@@ -92,13 +105,14 @@ class RemnawaveAPI:
         total = self._get_users_total()
         stream_users = self._get_users_stream(limit, page_size)
         if stream_users and (total is None or len(stream_users) >= min(total, limit)):
-            return stream_users
+            return [self._normalize_user(u) for u in stream_users]
         if stream_users:
             logger.warning(
                 "GET /api/users/stream returned %s of %s users; falling back to /api/users pagination",
                 len(stream_users), total,
             )
-        return self._get_users_legacy_paginated(limit, page_size)
+        users = self._get_users_legacy_paginated(limit, page_size)
+        return [self._normalize_user(u) for u in users]
 
     def _get_users_total(self) -> Optional[int]:
         raw = self._request('GET', '/api/users', params={"start": 0, "size": 1})
@@ -158,13 +172,15 @@ class RemnawaveAPI:
         return raw if isinstance(raw, list) else []
 
     def get_user(self, user_uuid: str) -> Optional[Dict]:
+        """``user_uuid`` is our normalized id (``str(user["id"])``) — REST
+        paths take the numeric id directly: ``GET /api/users/{id}``."""
         result = self._request('GET', f'/api/users/{user_uuid}')
         if isinstance(result, dict):
             if 'users' in result and isinstance(result['users'], list) and result['users']:
-                return result['users'][0]
-            if 'uuid' in result:
-                return result
-        return result if isinstance(result, dict) else None
+                return self._normalize_user(result['users'][0])
+            if 'id' in result or 'uuid' in result:
+                return self._normalize_user(result)
+        return None
 
     def get_node_bandwidth_stats(
         self, node_uuid: str, start_date: str, end_date: str, top_limit: int = 100
@@ -219,18 +235,23 @@ class RemnawaveAPI:
         self, user_uuid: str, node_uuid: str, start_date: str, end_date: str,
         username: Optional[str] = None,
     ) -> Optional[int]:
-        """Трафик пользователя: только через рабочий bulk-эндпоинт"""
+        """Трафик пользователя: только через рабочий bulk-эндпоинт.
+
+        topUsers entries carry no `uuid` either — just `userId` (numeric,
+        matches our normalized uuid=str(id)) and `username`.
+        """
         top_users = self.get_node_bandwidth(node_uuid, start_date, end_date, top_limit=500)
-        
+
         if username:
             for u in top_users:
                 if u.get("username") == username:
                     return int(u.get("total", 0))
-        
+
         for u in top_users:
-            if u.get("uuid") == user_uuid:
+            stat_id = u.get("uuid") or u.get("userId")
+            if stat_id is not None and str(stat_id) == str(user_uuid):
                 return int(u.get("total", 0))
-        
+
         logger.debug(f"User {username or user_uuid[:8]}... not found in topUsers for node {node_uuid[:8]}")
         return None
 
@@ -253,68 +274,71 @@ class RemnawaveAPI:
         if not user:
             return {'internal': [], 'external': []}
         internal = [s.get('uuid') for s in (user.get('activeInternalSquads') or []) if isinstance(s, dict) and s.get('uuid')]
-        external = [s.get('uuid') for s in (user.get('activeExternalSquads') or []) if isinstance(s, dict) and s.get('uuid')]
+        # Current Remnawave: one external squad slot per user (`externalSquadUuid`,
+        # nullable string), not a list — confirmed against a live panel and
+        # matches how Bedolaga's own client reads it.
+        ext = user.get('externalSquadUuid')
+        external = [ext] if ext else []
         return {'internal': internal, 'external': external}
-
-    def bulk_action_squad(self, squad_uuid: str, action: str, user_uuids: List[str], squad_type: str = 'internal') -> bool:
-        if not squad_uuid or action not in {"add", "remove"} or not user_uuids:
-            return False
-        path = f'/api/{squad_type}-squads/{squad_uuid}/bulk-actions/{action}-users'
-        result = self._request('POST', path, json={"userUuids": user_uuids})
-        return result is not None
-
-    def set_user_external_squads(
-        self, user_uuid: str, target_uuids, remove_from_all: bool = True
-    ) -> bool:
-        """Make the user's external-squad membership exactly ``target_uuids``.
-
-        Used when a user is limited/unblocked on several nodes at once: pass
-        every full (or limited) squad they should end up in, in one call, so
-        one node's update doesn't kick them out of another node's squad.
-        """
-        targets = {str(u).strip() for u in (target_uuids or []) if u and str(u).strip()}
-        current = set(self.get_user_current_squads(user_uuid).get("external", []))
-        logger.info(
-            "External squads for %s...: %s -> %s",
-            user_uuid[:8],
-            sorted(s[:8] for s in current),
-            sorted(s[:8] for s in targets),
-        )
-
-        success = True
-        if remove_from_all:
-            for cur_uuid in current - targets:
-                if not self.bulk_action_squad(cur_uuid, "remove", [user_uuid], "external"):
-                    logger.warning("   Failed to remove from external squad %s", cur_uuid[:8])
-                    success = False
-        for tgt in targets - current:
-            if not self.bulk_action_squad(tgt, "add", [user_uuid], "external"):
-                logger.error("   Failed to add to external squad %s", tgt[:8])
-                success = False
-
-        # Confirm the panel reflects the intended state before reporting success.
-        updated = set(self.get_user_current_squads(user_uuid).get("external", []))
-        if not targets.issubset(updated):
-            logger.error("Panel did not confirm target external squads for %s", user_uuid[:8])
-            success = False
-        if remove_from_all and (updated - targets):
-            logger.error(
-                "Panel still has extra external squads for %s: %s",
-                user_uuid[:8], sorted(s[:8] for s in updated - targets),
-            )
-            success = False
-
-        if success:
-            logger.info("   External squads updated for %s...", user_uuid[:8])
-        return success
 
     def set_user_external_squad(
         self, user_uuid: str, target_external_uuid: Optional[str], remove_from_all: bool = True
     ) -> bool:
-        target = (target_external_uuid or "").strip()
-        return self.set_user_external_squads(
-            user_uuid, [target] if target else [], remove_from_all=remove_from_all
-        )
+        """Set the user's external squad.
+
+        Current Remnawave versions give each user exactly one external-squad
+        slot (`externalSquadUuid` on the user record) instead of a
+        add/remove-from-list model — confirmed against a live panel (a decoy
+        page was the tell) and cross-checked against Bedolaga's own client,
+        which moves users the same way: ``PATCH /api/users`` with
+        ``{"id": <numeric id>, "externalSquadUuid": <target or null>}``.
+        ``remove_from_all`` is accepted for signature compatibility with
+        callers written for the old model; setting the single slot always
+        implicitly replaces whatever was there, so it has no separate effect.
+        """
+        try:
+            numeric_id = int(user_uuid)
+        except (TypeError, ValueError):
+            logger.error("set_user_external_squad: %r is not a numeric user id", user_uuid)
+            return False
+
+        target = (target_external_uuid or "").strip() or None
+        result = self._request('PATCH', '/api/users', json={"id": numeric_id, "externalSquadUuid": target})
+        if result is None:
+            logger.error("PATCH /api/users failed for id=%s -> externalSquadUuid=%s", numeric_id, target)
+            return False
+
+        updated = self.get_user(str(numeric_id))
+        current = (updated or {}).get('externalSquadUuid')
+        if current != target:
+            logger.error(
+                "Panel did not confirm externalSquadUuid for id=%s (got %r, wanted %r)",
+                numeric_id, current, target,
+            )
+            return False
+
+        logger.info("External squad for id=%s -> %s", numeric_id, target or "(cleared)")
+        return True
+
+    def set_user_external_squads(
+        self, user_uuid: str, target_uuids, remove_from_all: bool = True
+    ) -> bool:
+        """Compat shim for callers built around "several full squads at once"
+        (a user limited on more than one node simultaneously). The panel only
+        has one external-squad slot per user, so all of those can't be held
+        at the same time — uses the first (order-preserving de-duplicated)
+        target and logs a warning if more than one was actually requested,
+        rather than silently picking one with no trace.
+        """
+        targets = list(dict.fromkeys(str(u).strip() for u in (target_uuids or []) if u and str(u).strip()))
+        if len(targets) > 1:
+            logger.warning(
+                "set_user_external_squads: panel supports one external squad per user; "
+                "%s targets requested for id=%s, using %s — ignoring %s",
+                len(targets), user_uuid, targets[0], targets[1:],
+            )
+        target = targets[0] if targets else None
+        return self.set_user_external_squad(user_uuid, target, remove_from_all=remove_from_all)
 
     def move_user_to_squads(self, user_uuid: str, target_squads: Dict[str, str], remove_from_all: bool = True) -> bool:
         external = target_squads.get("external")

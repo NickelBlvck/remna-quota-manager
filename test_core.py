@@ -395,6 +395,128 @@ class RemnawaveGetUsersPaginationTests(unittest.TestCase):
         self.assertEqual({u["uuid"] for u in result}, {f"u{i}" for i in range(138)})
 
 
+class RemnawaveNoUuidUserModelTests(unittest.TestCase):
+    """Current Remnawave: users have no `uuid` field (id + shortUuid +
+    vlessUuid instead), and one externalSquadUuid slot, not a list — see
+    remnawave.RemnawaveAPI._normalize_user / set_user_external_squad."""
+
+    def test_normalize_user_injects_uuid_from_id(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        u = api._normalize_user({"id": 167, "username": "nigorshkov_428461294"})
+        self.assertEqual(u["uuid"], "167")
+
+    def test_normalize_user_leaves_existing_uuid_alone(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        u = api._normalize_user({"id": 167, "uuid": "already-set"})
+        self.assertEqual(u["uuid"], "already-set")
+
+    def test_get_users_normalizes_every_entry(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        raw_users = [{"id": i, "username": f"user{i}"} for i in range(5)]
+
+        def fake_request(method, path, **kwargs):
+            if path == '/api/users/stream':
+                return {"users": raw_users, "hasMore": False, "nextCursor": None}
+            return {"total": len(raw_users), "users": raw_users}
+
+        api._request = fake_request
+        result = api.get_users()
+        self.assertEqual([u["uuid"] for u in result], ["0", "1", "2", "3", "4"])
+
+    def test_get_user_current_squads_reads_singular_field(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        api.get_user = lambda uid: {
+            "id": 167, "uuid": "167",
+            "activeInternalSquads": [{"uuid": "internal-1", "name": "x"}],
+            "externalSquadUuid": "squad-limited",
+        }
+        squads = api.get_user_current_squads("167")
+        self.assertEqual(squads, {"internal": ["internal-1"], "external": ["squad-limited"]})
+
+    def test_get_user_current_squads_empty_when_no_squad(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        api.get_user = lambda uid: {"id": 167, "uuid": "167", "externalSquadUuid": None}
+        self.assertEqual(api.get_user_current_squads("167")["external"], [])
+
+    def test_set_user_external_squad_sends_patch_with_numeric_id(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        calls = []
+
+        def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs.get("json")))
+            if method == "PATCH":
+                return {"ok": True}
+            return {"id": 167, "uuid": "167", "externalSquadUuid": "squad-limited"}
+
+        api._request = fake_request
+        ok = api.set_user_external_squad("167", "squad-limited")
+        self.assertTrue(ok)
+        patch_calls = [c for c in calls if c[0] == "PATCH"]
+        self.assertEqual(len(patch_calls), 1)
+        self.assertEqual(patch_calls[0][1], "/api/users")
+        self.assertEqual(patch_calls[0][2], {"id": 167, "externalSquadUuid": "squad-limited"})
+
+    def test_set_user_external_squad_clears_with_none(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+
+        def fake_request(method, path, **kwargs):
+            if method == "PATCH":
+                self.assertIsNone(kwargs.get("json", {}).get("externalSquadUuid"))
+                return {"ok": True}
+            return {"id": 167, "uuid": "167", "externalSquadUuid": None}
+
+        api._request = fake_request
+        self.assertTrue(api.set_user_external_squad("167", None))
+
+    def test_set_user_external_squad_fails_if_panel_doesnt_confirm(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+
+        def fake_request(method, path, **kwargs):
+            if method == "PATCH":
+                return {"ok": True}
+            return {"id": 167, "uuid": "167", "externalSquadUuid": "something-else"}
+
+        api._request = fake_request
+        self.assertFalse(api.set_user_external_squad("167", "squad-limited"))
+
+    def test_set_user_external_squad_rejects_non_numeric_id(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        api._request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call API"))
+        self.assertFalse(api.set_user_external_squad("not-a-number", "squad-limited"))
+
+    def test_set_user_external_squads_uses_first_target_of_several(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        seen = []
+
+        def fake_set(user_uuid, target, remove_from_all=True):
+            seen.append(target)
+            return True
+
+        api.set_user_external_squad = fake_set
+        ok = api.set_user_external_squads("167", ["squad-a", "squad-b"])
+        self.assertTrue(ok)
+        self.assertEqual(seen, ["squad-a"])
+
+    def test_traffic_matches_by_userid_when_no_uuid_in_stats(self):
+        from remnawave import RemnawaveAPI
+        api = RemnawaveAPI("https://panel.example.com", "tok")
+        api.get_node_bandwidth = lambda *a, **k: [
+            {"userId": 167, "username": "nigorshkov_428461294", "total": 104416117741},
+        ]
+        raw = api.get_user_node_traffic_bytes("167", "node-uuid", "2026-08-01", "2026-09-01")
+        self.assertEqual(raw, 104416117741)
+
+
 class NodeResolutionTests(unittest.TestCase):
     class _FakeAPI:
         def get_nodes(self):
